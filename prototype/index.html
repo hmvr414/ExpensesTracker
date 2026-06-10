@@ -1,0 +1,688 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>ExpenseTracker – UI Prototype</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet" />
+  <style>
+    * { font-family: 'Inter', sans-serif; box-sizing: border-box; }
+    html, body { height: 100%; margin: 0; overflow: hidden; }
+    #app { display: flex; height: calc(100vh - 36px); margin-top: 36px; }
+    #form-overlay { display: none; }
+    #form-overlay.open { display: flex; }
+    .proto-active { outline: 2px solid rgba(0,0,0,0.4); outline-offset: 1px; }
+    input[type=number]::-webkit-inner-spin-button { -webkit-appearance: none; }
+    ::-webkit-scrollbar { width: 5px; }
+    ::-webkit-scrollbar-track { background: transparent; }
+    ::-webkit-scrollbar-thumb { background: #E5E7EB; border-radius: 9999px; }
+  </style>
+</head>
+<body class="bg-gray-50">
+
+  <!-- ═══════════════════════════════════════════════════════════
+       PROTOTYPE NAV BAR
+       ═══════════════════════════════════════════════════════════ -->
+  <div class="fixed top-0 left-0 right-0 z-[200] h-9 bg-amber-400 flex items-center gap-2 px-4 text-xs font-semibold shadow-sm">
+    <span class="text-amber-950 mr-1">⚡ Prototype</span>
+    <button
+      id="btn-dashboard"
+      onclick="goDashboard()"
+      class="px-3 py-1 rounded bg-amber-500 hover:bg-amber-600 text-amber-950 transition-colors proto-active">
+      Dashboard (Home)
+    </button>
+    <button
+      id="btn-form"
+      onclick="goForm()"
+      class="px-3 py-1 rounded bg-amber-500 hover:bg-amber-600 text-amber-950 transition-colors">
+      Add Expense Form
+    </button>
+    <span class="ml-auto text-amber-800 font-medium">ExpenseTracker · Iteration 1</span>
+  </div>
+
+  <!-- ═══════════════════════════════════════════════════════════
+       APP SHELL
+       ═══════════════════════════════════════════════════════════ -->
+  <div id="app">
+
+    <!-- ─── Sidebar ────────────────────────────────────────────── -->
+    <aside class="w-56 bg-indigo-950 flex flex-col flex-shrink-0 select-none">
+
+      <!-- Logo -->
+      <div class="px-5 py-5 border-b border-indigo-800/70">
+        <div class="flex items-center gap-2.5">
+          <div class="w-8 h-8 bg-indigo-500 rounded-lg flex items-center justify-center shadow-inner">
+            <svg class="w-4 h-4 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                d="M12 8c-1.657 0-3 .895-3 2s1.343 2 3 2 3 .895 3 2-1.343 2-3 2m0-8c1.11 0 2.08.402 2.599 1M12 8V7m0 1v8m0 0v1m0-1c-1.11 0-2.08-.402-2.599-1M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/>
+            </svg>
+          </div>
+          <div>
+            <div class="text-white font-semibold text-sm leading-tight">ExpenseTracker</div>
+            <div class="text-indigo-400 text-xs leading-tight">Personal Finance</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Nav links -->
+      <nav class="flex-1 px-3 py-4 space-y-0.5">
+        <!-- Dashboard (active) -->
+        <a href="#" class="flex items-center gap-3 px-3 py-2.5 rounded-lg bg-indigo-800/60 text-white text-sm font-medium">
+          <svg class="w-4 h-4 text-indigo-300 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+              d="M3 12l2-2m0 0l7-7 7 7M5 10v10a1 1 0 001 1h3m10-11l2 2m-2-2v10a1 1 0 01-1 1h-3m-6 0a1 1 0 001-1v-4a1 1 0 011-1h2a1 1 0 011 1v4a1 1 0 001 1m-6 0h6"/>
+          </svg>
+          Dashboard
+        </a>
+        <!-- Import -->
+        <a href="#" class="flex items-center gap-3 px-3 py-2.5 rounded-lg text-indigo-300 hover:bg-indigo-800/40 hover:text-indigo-100 transition-colors text-sm font-medium">
+          <svg class="w-4 h-4 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+              d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z"/>
+          </svg>
+          Import from Image
+        </a>
+        <!-- Categories -->
+        <a href="#" class="flex items-center gap-3 px-3 py-2.5 rounded-lg text-indigo-300 hover:bg-indigo-800/40 hover:text-indigo-100 transition-colors text-sm font-medium">
+          <svg class="w-4 h-4 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+              d="M7 7h.01M7 3h5c.512 0 1.024.195 1.414.586l7 7a2 2 0 010 2.828l-7 7a2 2 0 01-2.828 0l-7-7A1.994 1.994 0 013 12V7a4 4 0 014-4z"/>
+          </svg>
+          Categories
+        </a>
+      </nav>
+
+      <!-- User -->
+      <div class="px-3 pb-4 pt-3 border-t border-indigo-800/60">
+        <div class="flex items-center gap-3 px-2 py-2 rounded-lg hover:bg-indigo-800/40 transition-colors cursor-pointer">
+          <div class="w-8 h-8 rounded-full bg-gradient-to-br from-indigo-400 to-indigo-600 flex items-center justify-center text-xs font-bold text-white flex-shrink-0 shadow">H</div>
+          <div class="min-w-0">
+            <div class="text-xs font-semibold text-indigo-100 truncate">Hermann V.</div>
+            <div class="text-xs text-indigo-400 truncate">hmvr414@gmail.com</div>
+          </div>
+          <svg class="w-4 h-4 text-indigo-500 flex-shrink-0 ml-auto" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z"/>
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"/>
+          </svg>
+        </div>
+      </div>
+    </aside>
+
+    <!-- ─── Main column ─────────────────────────────────────────── -->
+    <div class="flex-1 flex flex-col min-w-0 relative overflow-hidden">
+
+      <!-- Top header -->
+      <header class="bg-white border-b border-gray-200 px-8 py-4 flex items-center justify-between flex-shrink-0">
+        <div>
+          <h1 class="text-lg font-semibold text-gray-900 leading-tight">Dashboard</h1>
+          <p class="text-xs text-gray-400 mt-0.5">Track and analyze your spending</p>
+        </div>
+        <button onclick="goForm()"
+          class="flex items-center gap-2 bg-indigo-600 text-white text-sm font-semibold px-4 py-2.5 rounded-xl hover:bg-indigo-700 transition-colors shadow-sm shadow-indigo-200">
+          <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M12 4v16m8-8H4"/>
+          </svg>
+          Add Expense
+        </button>
+      </header>
+
+      <!-- Period selector -->
+      <div class="bg-white border-b border-gray-200 px-8 py-3 flex items-center gap-5 flex-shrink-0">
+        <div class="flex bg-gray-100 rounded-xl p-1 gap-0.5">
+          <button class="px-3.5 py-1.5 text-xs font-medium text-gray-400 rounded-lg hover:bg-white hover:text-gray-700 hover:shadow-sm transition-all">Day</button>
+          <button class="px-3.5 py-1.5 text-xs font-medium text-gray-400 rounded-lg hover:bg-white hover:text-gray-700 hover:shadow-sm transition-all">Week</button>
+          <button class="px-3.5 py-1.5 text-xs font-medium text-gray-900 bg-white rounded-lg shadow-sm">Month</button>
+          <button class="px-3.5 py-1.5 text-xs font-medium text-gray-400 rounded-lg hover:bg-white hover:text-gray-700 hover:shadow-sm transition-all">Year</button>
+          <button class="px-3.5 py-1.5 text-xs font-medium text-gray-400 rounded-lg hover:bg-white hover:text-gray-700 hover:shadow-sm transition-all">All</button>
+        </div>
+        <div class="flex items-center gap-2">
+          <button class="w-7 h-7 flex items-center justify-center rounded-lg hover:bg-gray-100 text-gray-500 transition-colors">
+            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 19l-7-7 7-7"/>
+            </svg>
+          </button>
+          <span class="text-sm font-semibold text-gray-800 min-w-[100px] text-center">June 2026</span>
+          <button disabled class="w-7 h-7 flex items-center justify-center rounded-lg text-gray-300 cursor-not-allowed">
+            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7"/>
+            </svg>
+          </button>
+        </div>
+        <div class="ml-auto flex items-center gap-2 text-xs text-gray-400">
+          <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"/>
+          </svg>
+          <span>Filter / Search</span>
+        </div>
+      </div>
+
+      <!-- Scrollable dashboard content -->
+      <div class="flex-1 overflow-y-auto">
+        <div class="p-8 space-y-6">
+
+          <!-- ── Stat cards ─────────────────────────────────────── -->
+          <div class="grid grid-cols-3 gap-5">
+
+            <!-- Total Spend -->
+            <div class="bg-white rounded-2xl border border-gray-200 p-5 shadow-sm hover:shadow-md transition-shadow">
+              <div class="flex items-start justify-between">
+                <div class="flex-1 min-w-0">
+                  <p class="text-xs font-semibold text-gray-400 uppercase tracking-widest">Total Spend</p>
+                  <p class="text-3xl font-bold text-gray-900 mt-2 tracking-tight">$2,450<span class="text-xl text-gray-400 font-medium">.80</span></p>
+                  <div class="flex items-center gap-1.5 mt-2">
+                    <span class="inline-flex items-center gap-1 text-xs font-semibold text-red-500 bg-red-50 px-1.5 py-0.5 rounded-md">
+                      <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="3" d="M5 10l7-7m0 0l7 7m-7-7v18"/>
+                      </svg>
+                      12%
+                    </span>
+                    <span class="text-xs text-gray-400">vs May ($2,189)</span>
+                  </div>
+                </div>
+                <div class="w-11 h-11 rounded-xl bg-indigo-50 flex items-center justify-center flex-shrink-0 ml-3">
+                  <svg class="w-5 h-5 text-indigo-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                      d="M12 8c-1.657 0-3 .895-3 2s1.343 2 3 2 3 .895 3 2-1.343 2-3 2m0-8c1.11 0 2.08.402 2.599 1M12 8V7m0 1v8m0 0v1m0-1c-1.11 0-2.08-.402-2.599-1M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/>
+                  </svg>
+                </div>
+              </div>
+            </div>
+
+            <!-- Movements -->
+            <div class="bg-white rounded-2xl border border-gray-200 p-5 shadow-sm hover:shadow-md transition-shadow">
+              <div class="flex items-start justify-between">
+                <div class="flex-1 min-w-0">
+                  <p class="text-xs font-semibold text-gray-400 uppercase tracking-widest">Movements</p>
+                  <p class="text-3xl font-bold text-gray-900 mt-2 tracking-tight">23</p>
+                  <div class="flex items-center gap-1.5 mt-2">
+                    <span class="inline-flex items-center gap-1 text-xs font-semibold text-emerald-600 bg-emerald-50 px-1.5 py-0.5 rounded-md">
+                      <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="3" d="M19 14l-7 7m0 0l-7-7m7 7V3"/>
+                      </svg>
+                      3 less
+                    </span>
+                    <span class="text-xs text-gray-400">vs May (26)</span>
+                  </div>
+                </div>
+                <div class="w-11 h-11 rounded-xl bg-emerald-50 flex items-center justify-center flex-shrink-0 ml-3">
+                  <svg class="w-5 h-5 text-emerald-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                      d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2"/>
+                  </svg>
+                </div>
+              </div>
+            </div>
+
+            <!-- Top Category -->
+            <div class="bg-white rounded-2xl border border-gray-200 p-5 shadow-sm hover:shadow-md transition-shadow">
+              <div class="flex items-start justify-between">
+                <div class="flex-1 min-w-0">
+                  <p class="text-xs font-semibold text-gray-400 uppercase tracking-widest">Top Category</p>
+                  <p class="text-3xl font-bold text-gray-900 mt-2 tracking-tight">Food</p>
+                  <div class="flex items-center gap-1.5 mt-2">
+                    <span class="w-2 h-2 rounded-full bg-emerald-500 inline-block"></span>
+                    <span class="text-xs text-gray-400">$857.00 · 35% of total</span>
+                  </div>
+                </div>
+                <div class="w-11 h-11 rounded-xl bg-amber-50 flex items-center justify-center flex-shrink-0 ml-3">
+                  <svg class="w-5 h-5 text-amber-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                      d="M7 7h.01M7 3h5c.512 0 1.024.195 1.414.586l7 7a2 2 0 010 2.828l-7 7a2 2 0 01-2.828 0l-7-7A1.994 1.994 0 013 12V7a4 4 0 014-4z"/>
+                  </svg>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- ── Charts ─────────────────────────────────────────── -->
+          <div class="grid grid-cols-5 gap-5">
+
+            <!-- Donut: spend by category -->
+            <div class="col-span-2 bg-white rounded-2xl border border-gray-200 p-5 shadow-sm">
+              <div class="flex items-center justify-between mb-4">
+                <h3 class="text-sm font-semibold text-gray-900">By Category</h3>
+                <span class="text-xs text-gray-400">June 2026</span>
+              </div>
+              <div class="flex items-center gap-5">
+                <div class="relative flex-shrink-0" style="width:130px;height:130px">
+                  <canvas id="donutChart"></canvas>
+                  <div class="absolute inset-0 flex flex-col items-center justify-center pointer-events-none">
+                    <span class="text-lg font-bold text-gray-900">$2.4k</span>
+                    <span class="text-xs text-gray-400">total</span>
+                  </div>
+                </div>
+                <div class="space-y-2.5 flex-1 min-w-0">
+                  <div class="flex items-center justify-between">
+                    <span class="flex items-center gap-1.5 text-xs text-gray-700"><span class="w-2.5 h-2.5 rounded-full bg-emerald-500 flex-shrink-0"></span>Food</span>
+                    <span class="text-xs font-semibold text-gray-900">35% <span class="font-normal text-gray-400">$857</span></span>
+                  </div>
+                  <div class="flex items-center justify-between">
+                    <span class="flex items-center gap-1.5 text-xs text-gray-700"><span class="w-2.5 h-2.5 rounded-full bg-violet-500 flex-shrink-0"></span>Shopping</span>
+                    <span class="text-xs font-semibold text-gray-900">25% <span class="font-normal text-gray-400">$612</span></span>
+                  </div>
+                  <div class="flex items-center justify-between">
+                    <span class="flex items-center gap-1.5 text-xs text-gray-700"><span class="w-2.5 h-2.5 rounded-full bg-blue-500 flex-shrink-0"></span>Transport</span>
+                    <span class="text-xs font-semibold text-gray-900">20% <span class="font-normal text-gray-400">$490</span></span>
+                  </div>
+                  <div class="flex items-center justify-between">
+                    <span class="flex items-center gap-1.5 text-xs text-gray-700"><span class="w-2.5 h-2.5 rounded-full bg-amber-500 flex-shrink-0"></span>Entertain.</span>
+                    <span class="text-xs font-semibold text-gray-900">15% <span class="font-normal text-gray-400">$368</span></span>
+                  </div>
+                  <div class="flex items-center justify-between">
+                    <span class="flex items-center gap-1.5 text-xs text-gray-700"><span class="w-2.5 h-2.5 rounded-full bg-gray-400 flex-shrink-0"></span>Other</span>
+                    <span class="text-xs font-semibold text-gray-900">5% <span class="font-normal text-gray-400">$123</span></span>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <!-- Bar: daily spend -->
+            <div class="col-span-3 bg-white rounded-2xl border border-gray-200 p-5 shadow-sm">
+              <div class="flex items-center justify-between mb-4">
+                <h3 class="text-sm font-semibold text-gray-900">Daily Spend</h3>
+                <span class="text-xs text-gray-400">Jun 1 – Jun 9, 2026</span>
+              </div>
+              <canvas id="barChart" height="135"></canvas>
+            </div>
+          </div>
+
+          <!-- ── Recent movements ───────────────────────────────── -->
+          <div class="bg-white rounded-2xl border border-gray-200 shadow-sm overflow-hidden">
+            <div class="px-6 py-4 border-b border-gray-100 flex items-center justify-between">
+              <h3 class="text-sm font-semibold text-gray-900">Recent Movements</h3>
+              <a href="#" class="text-xs font-semibold text-indigo-600 hover:text-indigo-700">View all 23 →</a>
+            </div>
+            <table class="w-full">
+              <thead>
+                <tr class="bg-gray-50/60">
+                  <th class="px-6 py-3 text-left text-xs font-semibold text-gray-400 uppercase tracking-wider">Date</th>
+                  <th class="px-6 py-3 text-left text-xs font-semibold text-gray-400 uppercase tracking-wider">Description</th>
+                  <th class="px-6 py-3 text-left text-xs font-semibold text-gray-400 uppercase tracking-wider">Store</th>
+                  <th class="px-6 py-3 text-left text-xs font-semibold text-gray-400 uppercase tracking-wider">Category</th>
+                  <th class="px-6 py-3 text-right text-xs font-semibold text-gray-400 uppercase tracking-wider">Amount</th>
+                  <th class="px-6 py-3 w-10"></th>
+                </tr>
+              </thead>
+              <tbody class="divide-y divide-gray-100">
+
+                <tr class="hover:bg-indigo-50/30 cursor-pointer transition-colors group">
+                  <td class="px-6 py-3.5 text-sm text-gray-500 whitespace-nowrap">Jun 9, 2026</td>
+                  <td class="px-6 py-3.5 text-sm font-medium text-gray-900">Weekly groceries</td>
+                  <td class="px-6 py-3.5 text-sm text-gray-500">Walmart</td>
+                  <td class="px-6 py-3.5">
+                    <span class="inline-flex items-center gap-1.5 text-xs font-semibold px-2.5 py-1 rounded-full bg-emerald-100 text-emerald-800">
+                      <span class="w-1.5 h-1.5 rounded-full bg-emerald-500"></span>Food
+                    </span>
+                  </td>
+                  <td class="px-6 py-3.5 text-sm font-bold text-gray-900 text-right">$124.50</td>
+                  <td class="px-6 py-3.5 text-right">
+                    <button class="opacity-0 group-hover:opacity-100 text-gray-400 hover:text-indigo-600 transition-all">
+                      <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z"/></svg>
+                    </button>
+                  </td>
+                </tr>
+
+                <tr class="hover:bg-indigo-50/30 cursor-pointer transition-colors group">
+                  <td class="px-6 py-3.5 text-sm text-gray-500 whitespace-nowrap">Jun 8, 2026</td>
+                  <td class="px-6 py-3.5 text-sm font-medium text-gray-900">Uber ride to airport</td>
+                  <td class="px-6 py-3.5 text-sm text-gray-500">Uber</td>
+                  <td class="px-6 py-3.5">
+                    <span class="inline-flex items-center gap-1.5 text-xs font-semibold px-2.5 py-1 rounded-full bg-blue-100 text-blue-800">
+                      <span class="w-1.5 h-1.5 rounded-full bg-blue-500"></span>Transport
+                    </span>
+                  </td>
+                  <td class="px-6 py-3.5 text-sm font-bold text-gray-900 text-right">$38.00</td>
+                  <td class="px-6 py-3.5 text-right">
+                    <button class="opacity-0 group-hover:opacity-100 text-gray-400 hover:text-indigo-600 transition-all">
+                      <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z"/></svg>
+                    </button>
+                  </td>
+                </tr>
+
+                <tr class="hover:bg-indigo-50/30 cursor-pointer transition-colors group">
+                  <td class="px-6 py-3.5 text-sm text-gray-500 whitespace-nowrap">Jun 7, 2026</td>
+                  <td class="px-6 py-3.5 text-sm font-medium text-gray-900">Netflix subscription</td>
+                  <td class="px-6 py-3.5 text-sm text-gray-500">Netflix</td>
+                  <td class="px-6 py-3.5">
+                    <span class="inline-flex items-center gap-1.5 text-xs font-semibold px-2.5 py-1 rounded-full bg-amber-100 text-amber-800">
+                      <span class="w-1.5 h-1.5 rounded-full bg-amber-500"></span>Entertainment
+                    </span>
+                  </td>
+                  <td class="px-6 py-3.5 text-sm font-bold text-gray-900 text-right">$15.99</td>
+                  <td class="px-6 py-3.5 text-right">
+                    <button class="opacity-0 group-hover:opacity-100 text-gray-400 hover:text-indigo-600 transition-all">
+                      <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z"/></svg>
+                    </button>
+                  </td>
+                </tr>
+
+                <tr class="hover:bg-indigo-50/30 cursor-pointer transition-colors group">
+                  <td class="px-6 py-3.5 text-sm text-gray-500 whitespace-nowrap">Jun 6, 2026</td>
+                  <td class="px-6 py-3.5 text-sm font-medium text-gray-900">New running shoes</td>
+                  <td class="px-6 py-3.5 text-sm text-gray-500">Nike Store</td>
+                  <td class="px-6 py-3.5">
+                    <span class="inline-flex items-center gap-1.5 text-xs font-semibold px-2.5 py-1 rounded-full bg-violet-100 text-violet-800">
+                      <span class="w-1.5 h-1.5 rounded-full bg-violet-500"></span>Shopping
+                    </span>
+                  </td>
+                  <td class="px-6 py-3.5 text-sm font-bold text-gray-900 text-right">$189.00</td>
+                  <td class="px-6 py-3.5 text-right">
+                    <button class="opacity-0 group-hover:opacity-100 text-gray-400 hover:text-indigo-600 transition-all">
+                      <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z"/></svg>
+                    </button>
+                  </td>
+                </tr>
+
+                <tr class="hover:bg-indigo-50/30 cursor-pointer transition-colors group">
+                  <td class="px-6 py-3.5 text-sm text-gray-500 whitespace-nowrap">Jun 5, 2026</td>
+                  <td class="px-6 py-3.5 text-sm font-medium text-gray-900">Lunch at work</td>
+                  <td class="px-6 py-3.5 text-sm text-gray-500">Chipotle</td>
+                  <td class="px-6 py-3.5">
+                    <span class="inline-flex items-center gap-1.5 text-xs font-semibold px-2.5 py-1 rounded-full bg-emerald-100 text-emerald-800">
+                      <span class="w-1.5 h-1.5 rounded-full bg-emerald-500"></span>Food
+                    </span>
+                  </td>
+                  <td class="px-6 py-3.5 text-sm font-bold text-gray-900 text-right">$14.75</td>
+                  <td class="px-6 py-3.5 text-right">
+                    <button class="opacity-0 group-hover:opacity-100 text-gray-400 hover:text-indigo-600 transition-all">
+                      <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z"/></svg>
+                    </button>
+                  </td>
+                </tr>
+
+                <tr class="hover:bg-indigo-50/30 cursor-pointer transition-colors group">
+                  <td class="px-6 py-3.5 text-sm text-gray-500 whitespace-nowrap">Jun 4, 2026</td>
+                  <td class="px-6 py-3.5 text-sm font-medium text-gray-900">Gas station fill-up</td>
+                  <td class="px-6 py-3.5 text-sm text-gray-500">Shell</td>
+                  <td class="px-6 py-3.5">
+                    <span class="inline-flex items-center gap-1.5 text-xs font-semibold px-2.5 py-1 rounded-full bg-blue-100 text-blue-800">
+                      <span class="w-1.5 h-1.5 rounded-full bg-blue-500"></span>Transport
+                    </span>
+                  </td>
+                  <td class="px-6 py-3.5 text-sm font-bold text-gray-900 text-right">$62.40</td>
+                  <td class="px-6 py-3.5 text-right">
+                    <button class="opacity-0 group-hover:opacity-100 text-gray-400 hover:text-indigo-600 transition-all">
+                      <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z"/></svg>
+                    </button>
+                  </td>
+                </tr>
+
+              </tbody>
+            </table>
+          </div>
+
+        </div><!-- /p-8 -->
+      </div><!-- /scrollable -->
+
+      <!-- ═══════════════════════════════════════════════════════
+           FORM OVERLAY  (slide-over panel from the right)
+           ═══════════════════════════════════════════════════════ -->
+      <div id="form-overlay"
+        class="absolute inset-0 bg-black/40 backdrop-blur-[1px] z-50 items-stretch justify-end">
+
+        <!-- Click backdrop to close -->
+        <div class="flex-1" onclick="closeForm()"></div>
+
+        <!-- Panel -->
+        <div class="w-full max-w-[440px] bg-white h-full flex flex-col shadow-2xl" onclick="event.stopPropagation()">
+
+          <!-- Panel header -->
+          <div class="px-6 py-5 border-b border-gray-200 flex items-center justify-between flex-shrink-0 bg-white">
+            <div>
+              <h2 class="text-base font-bold text-gray-900">Add Expense</h2>
+              <p class="text-xs text-gray-400 mt-0.5">Record a new spending movement</p>
+            </div>
+            <button onclick="closeForm()"
+              class="w-8 h-8 flex items-center justify-center rounded-lg text-gray-400 hover:text-gray-700 hover:bg-gray-100 transition-colors">
+              <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/>
+              </svg>
+            </button>
+          </div>
+
+          <!-- Panel body -->
+          <div class="flex-1 overflow-y-auto px-6 py-6 space-y-5">
+
+            <!-- Amount (big, prominent) -->
+            <div>
+              <label class="block text-xs font-bold text-gray-500 mb-2 uppercase tracking-widest">
+                Amount <span class="text-red-500">*</span>
+              </label>
+              <div class="relative">
+                <span class="absolute left-4 top-1/2 -translate-y-1/2 text-2xl font-bold text-gray-300 select-none">$</span>
+                <input type="number" placeholder="0.00" step="0.01"
+                  class="w-full pl-9 pr-4 py-4 text-3xl font-bold text-gray-900 border-2 border-gray-200 rounded-2xl
+                         focus:outline-none focus:border-indigo-500 focus:ring-4 focus:ring-indigo-100
+                         placeholder-gray-200 transition-all" />
+              </div>
+            </div>
+
+            <!-- Date -->
+            <div>
+              <label class="block text-xs font-bold text-gray-500 mb-2 uppercase tracking-widest">
+                Date <span class="text-red-500">*</span>
+              </label>
+              <div class="relative">
+                <svg class="absolute left-3.5 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400 pointer-events-none" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z"/>
+                </svg>
+                <input type="date" value="2026-06-09"
+                  class="w-full pl-10 pr-4 py-2.5 text-sm text-gray-900 border border-gray-200 rounded-xl
+                         focus:outline-none focus:border-indigo-500 focus:ring-4 focus:ring-indigo-100 transition-all" />
+              </div>
+            </div>
+
+            <!-- Description -->
+            <div>
+              <label class="block text-xs font-bold text-gray-500 mb-2 uppercase tracking-widest">Description</label>
+              <div class="relative">
+                <svg class="absolute left-3.5 top-3 w-4 h-4 text-gray-400 pointer-events-none" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h16M4 12h16M4 18h7"/>
+                </svg>
+                <input type="text" placeholder="What was this for?"
+                  class="w-full pl-10 pr-4 py-2.5 text-sm text-gray-900 border border-gray-200 rounded-xl
+                         focus:outline-none focus:border-indigo-500 focus:ring-4 focus:ring-indigo-100 transition-all
+                         placeholder-gray-300" />
+              </div>
+            </div>
+
+            <!-- Store -->
+            <div>
+              <label class="block text-xs font-bold text-gray-500 mb-2 uppercase tracking-widest">Store</label>
+              <div class="relative">
+                <svg class="absolute left-3.5 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400 pointer-events-none" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 21V5a2 2 0 00-2-2H7a2 2 0 00-2 2v16m14 0h2m-2 0h-5m-9 0H3m2 0h5M9 7h1m-1 4h1m4-4h1m-1 4h1m-5 10v-5a1 1 0 011-1h2a1 1 0 011 1v5m-4 0h4"/>
+                </svg>
+                <input type="text" placeholder="Where did you spend?"
+                  class="w-full pl-10 pr-4 py-2.5 text-sm text-gray-900 border border-gray-200 rounded-xl
+                         focus:outline-none focus:border-indigo-500 focus:ring-4 focus:ring-indigo-100 transition-all
+                         placeholder-gray-300" />
+              </div>
+            </div>
+
+            <!-- Category -->
+            <div>
+              <label class="block text-xs font-bold text-gray-500 mb-2 uppercase tracking-widest">Category</label>
+              <div class="relative">
+                <svg class="absolute left-3.5 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400 pointer-events-none" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 7h.01M7 3h5c.512 0 1.024.195 1.414.586l7 7a2 2 0 010 2.828l-7 7a2 2 0 01-2.828 0l-7-7A1.994 1.994 0 013 12V7a4 4 0 014-4z"/>
+                </svg>
+                <select class="w-full pl-10 pr-4 py-2.5 text-sm text-gray-900 border border-gray-200 rounded-xl appearance-none
+                               focus:outline-none focus:border-indigo-500 focus:ring-4 focus:ring-indigo-100 transition-all bg-white">
+                  <option value="" class="text-gray-400">Select a category…</option>
+                  <option value="food">🍔  Food</option>
+                  <option value="transport">🚌  Transport</option>
+                  <option value="shopping">🛍  Shopping</option>
+                  <option value="entertainment">🎬  Entertainment</option>
+                  <option value="health">🏥  Health</option>
+                  <option value="utilities">💡  Utilities</option>
+                  <option value="other">📦  Other</option>
+                </select>
+                <svg class="absolute right-3.5 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400 pointer-events-none" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"/>
+                </svg>
+              </div>
+            </div>
+
+            <!-- Divider -->
+            <div class="border-t border-dashed border-gray-200 pt-1">
+              <p class="text-xs font-bold text-gray-400 uppercase tracking-widest mb-3">Attachments</p>
+
+              <!-- Drop zone -->
+              <div class="border-2 border-dashed border-gray-200 rounded-2xl p-6 text-center hover:border-indigo-300 hover:bg-indigo-50/40 transition-all cursor-pointer group">
+                <div class="w-12 h-12 rounded-2xl bg-gray-100 group-hover:bg-indigo-100 flex items-center justify-center mx-auto mb-3 transition-colors">
+                  <svg class="w-6 h-6 text-gray-400 group-hover:text-indigo-500 transition-colors" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5"
+                      d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z"/>
+                  </svg>
+                </div>
+                <p class="text-sm font-semibold text-gray-600 group-hover:text-indigo-700 transition-colors">Drop receipt here</p>
+                <p class="text-xs text-gray-400 mt-1">or <span class="text-indigo-600 font-semibold">browse files</span></p>
+                <p class="text-xs text-gray-300 mt-2">JPEG · PNG · PDF up to 10 MB</p>
+              </div>
+
+              <!-- Existing attachment example -->
+              <div class="mt-3 flex items-center gap-3 p-3 bg-gray-50 rounded-xl border border-gray-200">
+                <div class="w-10 h-10 bg-indigo-100 rounded-lg flex items-center justify-center flex-shrink-0">
+                  <svg class="w-5 h-5 text-indigo-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z"/>
+                  </svg>
+                </div>
+                <div class="flex-1 min-w-0">
+                  <p class="text-xs font-semibold text-gray-900 truncate">walmart-receipt-jun9.jpg</p>
+                  <p class="text-xs text-gray-400">124 KB · Uploaded</p>
+                </div>
+                <button class="text-gray-400 hover:text-red-500 transition-colors flex-shrink-0">
+                  <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"/>
+                  </svg>
+                </button>
+              </div>
+            </div>
+
+          </div><!-- /panel body -->
+
+          <!-- Panel footer -->
+          <div class="px-6 py-4 border-t border-gray-200 bg-gray-50/60 flex gap-3 flex-shrink-0">
+            <button onclick="closeForm()"
+              class="flex-1 px-4 py-2.5 text-sm font-semibold text-gray-600 bg-white border border-gray-200 rounded-xl hover:bg-gray-50 transition-colors">
+              Cancel
+            </button>
+            <button
+              class="flex-1 px-4 py-2.5 text-sm font-semibold text-white bg-indigo-600 rounded-xl hover:bg-indigo-700 transition-colors shadow-sm shadow-indigo-200 flex items-center justify-center gap-2">
+              <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M5 13l4 4L19 7"/>
+              </svg>
+              Save Expense
+            </button>
+          </div>
+        </div><!-- /panel -->
+      </div><!-- /form-overlay -->
+
+    </div><!-- /main column -->
+  </div><!-- /app -->
+
+  <!-- ═══════════════════════════════════════════════════════════
+       SCRIPTS
+       ═══════════════════════════════════════════════════════════ -->
+  <script>
+    // ── Proto nav ──────────────────────────────────────────────────────────
+    function goDashboard() {
+      closeForm();
+      document.getElementById('btn-dashboard').classList.add('proto-active');
+      document.getElementById('btn-form').classList.remove('proto-active');
+    }
+
+    function goForm() {
+      document.getElementById('form-overlay').classList.add('open');
+      document.getElementById('btn-form').classList.add('proto-active');
+      document.getElementById('btn-dashboard').classList.remove('proto-active');
+    }
+
+    function closeForm() {
+      document.getElementById('form-overlay').classList.remove('open');
+      document.getElementById('btn-dashboard').classList.add('proto-active');
+      document.getElementById('btn-form').classList.remove('proto-active');
+    }
+
+    // ── Donut chart ────────────────────────────────────────────────────────
+    new Chart(document.getElementById('donutChart'), {
+      type: 'doughnut',
+      data: {
+        labels: ['Food', 'Shopping', 'Transport', 'Entertainment', 'Other'],
+        datasets: [{
+          data: [35, 25, 20, 15, 5],
+          backgroundColor: ['#10B981', '#8B5CF6', '#3B82F6', '#F59E0B', '#9CA3AF'],
+          borderWidth: 2,
+          borderColor: '#fff',
+          hoverOffset: 5,
+        }]
+      },
+      options: {
+        cutout: '70%',
+        plugins: {
+          legend: { display: false },
+          tooltip: {
+            callbacks: {
+              label: ctx => `  ${ctx.label}: ${ctx.raw}%`
+            },
+            padding: 10,
+            bodyFont: { family: 'Inter', size: 12 },
+          }
+        },
+        animation: { animateRotate: true, duration: 900, easing: 'easeOutQuart' }
+      }
+    });
+
+    // ── Bar chart ──────────────────────────────────────────────────────────
+    const labels = ['Jun 1','Jun 2','Jun 3','Jun 4','Jun 5','Jun 6','Jun 7','Jun 8','Jun 9'];
+    const data   = [120, 45, 210, 62, 89, 190, 16, 38, 367];
+    const colors = data.map((_, i) => i === data.length - 1 ? '#4F46E5' : '#E0E7FF');
+
+    new Chart(document.getElementById('barChart'), {
+      type: 'bar',
+      data: {
+        labels,
+        datasets: [{
+          label: 'Spend',
+          data,
+          backgroundColor: colors,
+          hoverBackgroundColor: data.map((_, i) => i === data.length - 1 ? '#4338CA' : '#C7D2FE'),
+          borderRadius: 6,
+          borderSkipped: false,
+        }]
+      },
+      options: {
+        plugins: {
+          legend: { display: false },
+          tooltip: {
+            callbacks: { label: ctx => `  $${ctx.raw.toFixed(2)}` },
+            padding: 10,
+            bodyFont: { family: 'Inter', size: 12 },
+          }
+        },
+        scales: {
+          x: {
+            grid: { display: false },
+            border: { display: false },
+            ticks: { font: { size: 11, family: 'Inter' }, color: '#9CA3AF' }
+          },
+          y: {
+            grid: { color: '#F3F4F6', lineWidth: 1 },
+            border: { display: false, dash: [4, 4] },
+            ticks: {
+              font: { size: 11, family: 'Inter' },
+              color: '#9CA3AF',
+              callback: v => '$' + v
+            }
+          }
+        },
+        animation: { duration: 700, easing: 'easeOutQuart' }
+      }
+    });
+  </script>
+</body>
+</html>

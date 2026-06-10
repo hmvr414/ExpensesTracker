@@ -152,7 +152,8 @@ router.post('/extract', (req: Request, res: Response) => {
 
       const content = completion.choices[0]?.message?.content;
       if (content) {
-        const parsed = JSON.parse(content) as { movements?: ExtractedMovement[] };
+        const stripped = content.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '').trim();
+        const parsed = JSON.parse(stripped) as { movements?: ExtractedMovement[] };
         const rawMovements = Array.isArray(parsed.movements) ? parsed.movements : [];
 
         movements = await Promise.all(

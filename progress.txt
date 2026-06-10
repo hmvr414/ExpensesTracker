@@ -1,0 +1,108 @@
+--- 2026-06-09 ---
+Feature completed: Build the category management screen (client/src/pages/Categories.tsx)
+
+Implemented all PRD requirements for the /categories route:
+- Category list with color swatch, name, emoji icon, and movement count badge
+- Skeleton loader while fetching; empty state with "Create your first category" when list is empty
+- Add Category inline form at top: name input, emoji input, preset color palette + native color picker
+- Inline editing: click edit icon to switch row to edit mode with inputs for name, color, emoji; save on Enter or blur
+- Delete with confirmation popover; delete button disabled (with tooltip) when movement_count > 0
+- Optimistic local state updates (sort by name on add/edit; remove on delete) — no extra re-fetch needed
+
+Tests: 106 passing (added 20 new tests in client/src/__tests__/Categories.test.tsx)
+Build: both api/ and client/ compile cleanly
+
+Remaining items in prd.json with passes: false:
+1. Build the OCR-assisted image import flow (client/src/pages/Import.tsx is a stub)
+2. Containerize the application with Docker and Docker Compose
+3. Cross-cutting: validation, error handling, and production configuration
+
+--- 2026-06-09 ---
+Feature completed: Build the OCR-assisted image import flow (client/src/pages/Import.tsx)
+
+Implemented all PRD requirements for the /import route (4-step wizard):
+- Step 1 — Upload: centered drop zone (drag-and-drop + click-to-browse) for JPEG/PNG/PDF; thumbnail
+  preview for images, PDF icon for PDFs; "Process Image" button disabled until a file is selected
+- Step 2 — Processing: multi-stage progress indicator ("Extracting text...", "Analyzing with AI...")
+  shown while POST /api/import/extract is in flight; stage switches via a 2-second timer
+- Step 3 — Review: editable table of extracted movements (Amount, Date, Description, Store, Category);
+  AI-suggested categories shown with ✦ AI badge; badge cleared when user overrides manually;
+  debounced (400 ms) POST /api/suggest/category on store/description change per row; Add row / Remove
+  row buttons; raw OCR text in a collapsible <details> panel; uploaded image in a side panel;
+  error notice shown when AI extraction fails (user can still add rows manually)
+- Step 4 — Confirm: "Import N Movements" button posts to /api/import/confirm; success summary lists
+  each created movement with amount; link back to Dashboard
+
+Backend was already fully implemented (api/src/routes/import.ts, api/src/helpers/ocr.ts).
+Client API types were already in place (client/src/api/import.ts).
+
+Tests: 126 passing (added 20 new tests in client/src/__tests__/Import.test.tsx)
+Build: both api/ and client/ compile cleanly with no TypeScript errors
+
+Remaining items in prd.json with passes: false:
+1. Containerize the application with Docker and Docker Compose
+2. Cross-cutting: validation, error handling, and production configuration
+
+--- 2026-06-09 ---
+Feature completed: Cross-cutting validation, error handling, and production configuration
+
+Gaps identified and fixed (all code was already partially implemented):
+
+1. suggest.ts validation error format — was returning flat `{ error: message }` on the cross-field
+   "at least one field required" check; updated to the standard shape used everywhere else:
+   `{ error: 'Validation failed', details: { body: message } }`.
+
+2. Global error handler production logging — was logging stack via console.error() in production
+   (only test mode was suppressed). Extracted the handler to
+   `api/src/middleware/errorHandler.ts` and added `process.env.NODE_ENV !== 'production'` guard.
+   Development still logs; test and production are both silent.
+
+3. Root .env.example — created with all variables consumed by docker-compose.yml:
+   POSTGRES_USER, POSTGRES_PASSWORD, POSTGRES_DB, DATABASE_URL, PORT, UPLOAD_DIR,
+   CORS_ORIGIN, OPENROUTER_API_KEY, OPENROUTER_MODEL, NODE_ENV.
+
+4. Root .gitignore — created; .env is excluded so secrets are never committed.
+
+5. README.md — created at repo root covering both workflows:
+   - Bare-metal: prerequisites (Node 20+, PostgreSQL, Tesseract), install deps,
+     `npm run migrate`, `npm run dev` / `npm start`
+   - Docker: `cp .env.example .env`, `docker compose up --build`,
+     `docker compose run api npm run migrate`
+   Also documents all env variables and available npm scripts.
+
+Tests: 118 API (added 7 new in error-handler.test.ts, 1 new in suggest.test.ts) + 126 client = 244 total
+Build: api/ and client/ compile cleanly
+
+Remaining items in prd.json with passes: false:
+1. Containerize the application with Docker and Docker Compose
+
+--- 2026-06-09 ---
+Feature completed: Containerize the application with Docker and Docker Compose
+
+Created all Docker artifacts — no prior implementation existed:
+
+- api/Dockerfile: two-stage build (node:lts builder → node:lts-slim runtime); runtime stage installs
+  tesseract-ocr + tesseract-ocr-eng via apt, copies dist/ and production node_modules, also copies
+  migrations/ so `docker compose run api npm run migrate` works inside the container; CMD is
+  `node dist/index.js`
+
+- client/Dockerfile: two-stage build (node:lts builder runs `vite build` → nginx:alpine runtime);
+  copies built dist/ to /usr/share/nginx/html and installs nginx.conf
+
+- client/nginx.conf: serves SPA with `try_files $uri $uri/ /index.html`; proxies /api and /uploads
+  to the api service so the nginx container reaches the API in production
+
+- docker-compose.yml (root): three services — postgres:16-alpine with pgdata named volume and
+  pg_isready healthcheck; api with depends_on postgres (service_healthy), uploads named volume, env
+  from .env; client with port 80 exposed, depends_on api
+
+- docker-compose.override.yml (root): dev overrides — api mounts ./api/src and runs nodemon; client
+  mounts ./client/src and runs `vite --host` on port 5173; both skip the production build stage
+
+- api/.dockerignore and client/.dockerignore: exclude node_modules, dist, .env, test files
+
+Validation: `docker compose config` passes cleanly with both compose files; api/ and client/ compile
+without TypeScript errors; all 244 tests pass (118 API + 126 client).
+
+Remaining items in prd.json with passes: false:
+None — all PRD items are now complete.

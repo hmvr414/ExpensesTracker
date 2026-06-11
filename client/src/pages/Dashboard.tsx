@@ -13,7 +13,9 @@ import {
   ResponsiveContainer,
 } from 'recharts';
 import { getDashboard, DashboardData, DashboardPeriod } from '../api/dashboard';
-import { getMovements, Movement } from '../api/movements';
+import { getMovements, Movement, GetMovementsParams } from '../api/movements';
+import { getPaymentMethods, PaymentMethod } from '../api/paymentMethods';
+import { paymentMethodIcon } from '../helpers/paymentMethod';
 import { PeriodSelector } from '../components/PeriodSelector';
 import { MovementForm } from '../components/MovementForm';
 
@@ -73,6 +75,8 @@ export function Dashboard() {
 
   const [dashboard, setDashboard] = useState<DashboardData | null>(null);
   const [movements, setMovements] = useState<Movement[]>([]);
+  const [paymentMethods, setPaymentMethods] = useState<PaymentMethod[]>([]);
+  const [pmFilter, setPmFilter] = useState<number | null>(null);
   const [loading, setLoading] = useState(true);
   const [fetching, setFetching] = useState(false);
   const isFirstLoad = useRef(true);
@@ -81,11 +85,17 @@ export function Dashboard() {
   const [editMovement, setEditMovement] = useState<Movement | undefined>(undefined);
 
   useEffect(() => {
+    getPaymentMethods().then(setPaymentMethods).catch(() => {});
+  }, []);
+
+  useEffect(() => {
     let cancelled = false;
     if (!isFirstLoad.current) {
       setFetching(true);
     }
-    Promise.all([getDashboard({ period, anchor }), getMovements({ limit: 5 })]).then(
+    const movementParams: GetMovementsParams = { limit: 5 };
+    if (pmFilter != null) movementParams.payment_method_id = pmFilter;
+    Promise.all([getDashboard({ period, anchor }), getMovements(movementParams)]).then(
       ([dash, mov]) => {
         if (cancelled) return;
         setDashboard(dash);
@@ -98,7 +108,7 @@ export function Dashboard() {
     return () => {
       cancelled = true;
     };
-  }, [period, anchor, refreshKey]);
+  }, [period, anchor, refreshKey, pmFilter]);
 
   function handlePeriodChange(newPeriod: DashboardPeriod, newAnchor: string) {
     setSearchParams({ period: newPeriod, anchor: newAnchor });
@@ -267,6 +277,43 @@ export function Dashboard() {
           )}
         </div>
 
+        {/* Payment method bar chart — sits under the category donut in the grid */}
+        {dashboard!.paymentMethodBreakdown.length > 0 && (
+          <div className="bg-white dark:bg-neutral-800 rounded-xl shadow-sm p-5 border border-neutral-100 dark:border-neutral-700 lg:order-last">
+            <h2 className="text-base font-semibold text-neutral-800 dark:text-white mb-4">
+              Spend by Payment Method
+            </h2>
+            <ResponsiveContainer width="100%" height={180}>
+              <BarChart
+                data={dashboard!.paymentMethodBreakdown}
+                layout="vertical"
+                margin={{ top: 4, right: 4, left: 8, bottom: 0 }}
+              >
+                <CartesianGrid strokeDasharray="3 3" horizontal={false} stroke="#e5e7eb" />
+                <XAxis
+                  type="number"
+                  tick={{ fontSize: 11, fill: '#9ca3af' }}
+                  axisLine={false}
+                  tickLine={false}
+                />
+                <YAxis
+                  type="category"
+                  dataKey="name"
+                  width={110}
+                  tick={{ fontSize: 11, fill: '#9ca3af' }}
+                  axisLine={false}
+                  tickLine={false}
+                />
+                <Tooltip
+                  formatter={(v) => [`$${formatCurrency(Number(v))}`, 'Spend']}
+                  contentStyle={{ borderRadius: '8px', fontSize: '12px' }}
+                />
+                <Bar dataKey="total" fill="#6366f1" radius={[0, 4, 4, 0]} />
+              </BarChart>
+            </ResponsiveContainer>
+          </div>
+        )}
+
         {/* Bar chart */}
         <div className="bg-white dark:bg-neutral-800 rounded-xl shadow-sm p-5 border border-neutral-100 dark:border-neutral-700">
           <h2 className="text-base font-semibold text-neutral-800 dark:text-white mb-4">
@@ -298,10 +345,23 @@ export function Dashboard() {
 
       {/* Recent Movements */}
       <div className="bg-white dark:bg-neutral-800 rounded-xl shadow-sm border border-neutral-100 dark:border-neutral-700">
-        <div className="px-5 py-4 border-b border-neutral-100 dark:border-neutral-700">
+        <div className="px-5 py-4 border-b border-neutral-100 dark:border-neutral-700 flex items-center justify-between gap-3">
           <h2 className="text-base font-semibold text-neutral-800 dark:text-white">
             Recent Movements
           </h2>
+          <select
+            aria-label="Filter by payment method"
+            value={pmFilter ?? ''}
+            onChange={(e) => setPmFilter(e.target.value ? Number(e.target.value) : null)}
+            className="rounded-lg border border-neutral-300 dark:border-neutral-600 px-2 py-1 text-xs focus:outline-none focus:ring-2 focus:ring-primary-500 bg-white dark:bg-neutral-700 text-neutral-700 dark:text-neutral-200"
+          >
+            <option value="">All payment methods</option>
+            {paymentMethods.map((pm) => (
+              <option key={pm.id} value={pm.id}>
+                {paymentMethodIcon(pm.kind)} {pm.name}
+              </option>
+            ))}
+          </select>
         </div>
         <ul>
           {movements.map((m) => (
@@ -322,6 +382,14 @@ export function Dashboard() {
                   style={{ backgroundColor: m.category_color ?? FALLBACK_COLOR }}
                 >
                   {m.category_name}
+                </span>
+              )}
+              {m.payment_method && (
+                <span
+                  data-testid="pm-badge"
+                  className="px-2 py-0.5 rounded-full text-xs font-medium bg-neutral-100 dark:bg-neutral-700 text-neutral-600 dark:text-neutral-300 flex-shrink-0"
+                >
+                  {paymentMethodIcon(m.payment_method.kind)} {m.payment_method.name}
                 </span>
               )}
               <span className="text-sm font-semibold text-neutral-900 dark:text-white w-20 text-right flex-shrink-0">

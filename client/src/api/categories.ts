@@ -1,5 +1,12 @@
 import axios from 'axios';
 
+export interface ResolvedCategory {
+  id: number;
+  name: string;
+  color: string | null;
+  created: boolean;
+}
+
 export interface Category {
   id: number;
   name: string;

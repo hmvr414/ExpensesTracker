@@ -20,7 +20,22 @@ describe('POST /api/suggest/category', () => {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   let mockCreate: jest.Mock<any, any>;
 
-  beforeAll(() => {
+  // Stores referenced in this suite. Pre-seeding empty store_context rows
+  // marks them as already searched, so the web-enrichment pass never fires
+  // and the per-test OpenAI call counts stay deterministic.
+  const SUITE_STORES = [
+    'SomeRandomStore',
+    'McDonalds',
+    'SlowStore',
+    'BrokenStore',
+    'SomeStore',
+    'OPENROUTER, INC',
+    'SlowSecondPass',
+    'EmptyName',
+    'LongName',
+  ];
+
+  beforeAll(async () => {
     execSync('node-pg-migrate up --migrations-dir migrations', {
       cwd: apiRoot,
       env: { ...process.env, DATABASE_URL: TEST_DB_URL },
@@ -30,6 +45,15 @@ describe('POST /api/suggest/category', () => {
     process.env.DATABASE_URL = TEST_DB_URL;
     resetPool();
     app = createApp();
+
+    for (const store of SUITE_STORES) {
+      await pool.query(
+        `INSERT INTO store_context (store, summary, fetched_at)
+         VALUES (LOWER($1), '', NOW())
+         ON CONFLICT (store) DO NOTHING`,
+        [store]
+      );
+    }
   });
 
   beforeEach(() => {
@@ -43,6 +67,10 @@ describe('POST /api/suggest/category', () => {
   });
 
   afterAll(async () => {
+    await pool.query(
+      `DELETE FROM store_context WHERE store = ANY($1)`,
+      [SUITE_STORES.map(s => s.toLowerCase())]
+    );
     await pool.end();
   });
 
@@ -158,5 +186,120 @@ describe('POST /api/suggest/category', () => {
       .send({ store: 'SomeStore' });
     expect(res.status).toBe(200);
     expect(res.body.categoryId).toBeNull();
+  });
+
+  describe('second pass — suggestedNewCategory', () => {
+    it('makes a second pass and returns suggestedNewCategory when the first pass yields null', async () => {
+      mockCreate
+        .mockResolvedValueOnce({
+          choices: [{ message: { content: JSON.stringify({ categoryId: null, reason: 'no match' }) } }],
+        })
+        .mockResolvedValueOnce({
+          choices: [{ message: { content: JSON.stringify({ newCategoryName: 'Software' }) } }],
+        });
+
+      const res = await request(app)
+        .post('/api/suggest/category')
+        .send({ store: 'OPENROUTER, INC', description: 'API credits' });
+
+      expect(res.status).toBe(200);
+      expect(res.body.categoryId).toBeNull();
+      expect(res.body.suggestedNewCategory).toBe('Software');
+      expect(mockCreate).toHaveBeenCalledTimes(2);
+    });
+
+    it('does not make a second pass when the first pass matches a category', async () => {
+      const catResult = await pool.query<{ id: number }>(
+        `SELECT id FROM categories WHERE name = 'Food' LIMIT 1`
+      );
+      mockCreate.mockResolvedValue({
+        choices: [
+          { message: { content: JSON.stringify({ categoryId: catResult.rows[0].id }) } },
+        ],
+      });
+
+      const res = await request(app)
+        .post('/api/suggest/category')
+        .send({ store: 'McDonalds' });
+
+      expect(res.status).toBe(200);
+      expect(res.body.categoryId).toBe(catResult.rows[0].id);
+      expect(res.body.suggestedNewCategory).toBeNull();
+      expect(mockCreate).toHaveBeenCalledTimes(1);
+    });
+
+    it('returns suggestedNewCategory null when the second pass throws', async () => {
+      mockCreate
+        .mockResolvedValueOnce({
+          choices: [{ message: { content: JSON.stringify({ categoryId: null }) } }],
+        })
+        .mockRejectedValueOnce(new Error('network error'));
+
+      const res = await request(app)
+        .post('/api/suggest/category')
+        .send({ store: 'BrokenStore' });
+
+      expect(res.status).toBe(200);
+      expect(res.body.categoryId).toBeNull();
+      expect(res.body.suggestedNewCategory).toBeNull();
+    });
+
+    it('returns suggestedNewCategory null when the second pass times out', async () => {
+      mockCreate
+        .mockResolvedValueOnce({
+          choices: [{ message: { content: JSON.stringify({ categoryId: null }) } }],
+        })
+        .mockImplementationOnce(
+          () => new Promise(resolve => setTimeout(resolve, 10_000))
+        );
+
+      const res = await request(app)
+        .post('/api/suggest/category')
+        .send({ store: 'SlowSecondPass' });
+
+      expect(res.status).toBe(200);
+      expect(res.body.suggestedNewCategory).toBeNull();
+    }, 5000);
+
+    it('does not make a second pass when the first pass errors out', async () => {
+      mockCreate.mockRejectedValue(new Error('network error'));
+
+      const res = await request(app)
+        .post('/api/suggest/category')
+        .send({ store: 'BrokenStore' });
+
+      expect(res.status).toBe(200);
+      expect(res.body.categoryId).toBeNull();
+      expect(res.body.suggestedNewCategory).toBeNull();
+      expect(mockCreate).toHaveBeenCalledTimes(1);
+    });
+
+    it('rejects invalid second-pass names (empty or over 40 chars)', async () => {
+      mockCreate
+        .mockResolvedValueOnce({
+          choices: [{ message: { content: JSON.stringify({ categoryId: null }) } }],
+        })
+        .mockResolvedValueOnce({
+          choices: [{ message: { content: JSON.stringify({ newCategoryName: '   ' }) } }],
+        });
+
+      let res = await request(app)
+        .post('/api/suggest/category')
+        .send({ store: 'EmptyName' });
+      expect(res.body.suggestedNewCategory).toBeNull();
+
+      mockCreate
+        .mockResolvedValueOnce({
+          choices: [{ message: { content: JSON.stringify({ categoryId: null }) } }],
+        })
+        .mockResolvedValueOnce({
+          choices: [{ message: { content: JSON.stringify({ newCategoryName: 'x'.repeat(41) }) } }],
+        });
+
+      res = await request(app)
+        .post('/api/suggest/category')
+        .send({ store: 'LongName' });
+      expect(res.body.suggestedNewCategory).toBeNull();
+    });
   });
 });

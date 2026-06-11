@@ -3,6 +3,7 @@ import { Nav } from './components/Nav';
 import { Dashboard } from './pages/Dashboard';
 import { Import } from './pages/Import';
 import { Categories } from './pages/Categories';
+import { PaymentMethods } from './pages/PaymentMethods';
 
 export function AppRoutes() {
   return (
@@ -10,6 +11,7 @@ export function AppRoutes() {
       <Route path="/" element={<Dashboard />} />
       <Route path="/import" element={<Import />} />
       <Route path="/categories" element={<Categories />} />
+      <Route path="/payment-methods" element={<PaymentMethods />} />
     </Routes>
   );
 }

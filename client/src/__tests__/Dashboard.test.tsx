@@ -1,12 +1,14 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen, waitFor } from '@testing-library/react';
+import { render, screen, waitFor, fireEvent } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import { Dashboard } from '../pages/Dashboard';
 import * as dashboardApi from '../api/dashboard';
 import * as movementsApi from '../api/movements';
+import * as paymentMethodsApi from '../api/paymentMethods';
 
 vi.mock('../api/dashboard');
 vi.mock('../api/movements');
+vi.mock('../api/paymentMethods');
 vi.mock('recharts', () => ({
   PieChart: ({ children }: { children: React.ReactNode }) => (
     <div data-testid="pie-chart">{children}</div>
@@ -32,6 +34,10 @@ const mockDashboard = {
     { categoryId: 1, name: 'Food', color: '#FF5733', total: 800, percentage: 53.3 },
     { categoryId: 2, name: 'Transport', color: '#33FF57', total: 700, percentage: 46.7 },
   ],
+  paymentMethodBreakdown: [
+    { paymentMethodId: 1, name: 'Cash', kind: 'cash', total: 500, percentage: 33.3 },
+    { paymentMethodId: 2, name: 'Visa Platinum', kind: 'card', total: 1000, percentage: 66.7 },
+  ],
   timeSeries: [
     { label: 'Jan', total: 500 },
     { label: 'Feb', total: 1000 },
@@ -39,6 +45,11 @@ const mockDashboard = {
   previousPeriod: { totalAmount: 1200, movementCount: 8 },
   topStore: 'Walmart',
 };
+
+const mockPaymentMethods = [
+  { id: 1, name: 'Cash', kind: 'cash' as const, brand: null, variant: null, last4: null, movement_count: 2, created_at: '2026-01-01T00:00:00Z' },
+  { id: 2, name: 'Visa Platinum', kind: 'card' as const, brand: 'visa' as const, variant: 'platinum', last4: '1234', movement_count: 3, created_at: '2026-01-01T00:00:00Z' },
+];
 
 const mockMovements = {
   data: [
@@ -51,6 +62,14 @@ const mockMovements = {
       category_id: 1,
       category_name: 'Food',
       category_color: '#FF5733',
+      payment_method_id: 2,
+      payment_method: {
+        id: 2,
+        name: 'Visa Platinum',
+        kind: 'card' as const,
+        brand: 'visa' as const,
+        variant: 'platinum',
+      },
       attachments: [],
       created_at: '2026-06-01T00:00:00Z',
       updated_at: '2026-06-01T00:00:00Z',
@@ -72,6 +91,7 @@ function renderDashboard() {
 describe('Dashboard', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    vi.mocked(paymentMethodsApi.getPaymentMethods).mockResolvedValue(mockPaymentMethods);
   });
 
   it('shows skeleton loaders while data is loading', () => {
@@ -151,7 +171,7 @@ describe('Dashboard', () => {
     vi.mocked(movementsApi.getMovements).mockResolvedValue(mockMovements);
     renderDashboard();
     await waitFor(() => {
-      expect(screen.getByTestId('bar-chart')).toBeInTheDocument();
+      expect(screen.getAllByTestId('bar-chart').length).toBeGreaterThan(0);
     });
   });
 
@@ -206,6 +226,108 @@ describe('Dashboard', () => {
       expect(screen.getByText(/no expenses yet/i)).toBeInTheDocument();
       expect(screen.getByText(/add your first expense/i)).toBeInTheDocument();
     });
+  });
+
+  // --- Payment methods ---
+
+  it('shows a payment method badge on movement rows that have one', async () => {
+    vi.mocked(dashboardApi.getDashboard).mockResolvedValue(mockDashboard);
+    vi.mocked(movementsApi.getMovements).mockResolvedValue(mockMovements);
+    renderDashboard();
+    await waitFor(() => {
+      expect(screen.getByTestId('pm-badge')).toHaveTextContent('Visa Platinum');
+    });
+  });
+
+  it('omits the payment method badge when the movement has none', async () => {
+    vi.mocked(dashboardApi.getDashboard).mockResolvedValue(mockDashboard);
+    vi.mocked(movementsApi.getMovements).mockResolvedValue({
+      ...mockMovements,
+      data: [
+        { ...mockMovements.data[0], payment_method_id: null, payment_method: null },
+      ],
+    });
+    renderDashboard();
+    await waitFor(() => {
+      expect(screen.getByText('Recent Movements')).toBeInTheDocument();
+    });
+    expect(screen.queryByTestId('pm-badge')).not.toBeInTheDocument();
+  });
+
+  it('renders a payment method filter populated from getPaymentMethods', async () => {
+    vi.mocked(dashboardApi.getDashboard).mockResolvedValue(mockDashboard);
+    vi.mocked(movementsApi.getMovements).mockResolvedValue(mockMovements);
+    renderDashboard();
+    await waitFor(() => {
+      const filter = screen.getByLabelText(/filter by payment method/i);
+      expect(filter).toBeInTheDocument();
+      expect(screen.getByRole('option', { name: /all payment methods/i })).toBeInTheDocument();
+      expect(screen.getByRole('option', { name: '💵 Cash' })).toBeInTheDocument();
+    });
+  });
+
+  it('refetches movements with payment_method_id when the filter changes', async () => {
+    vi.mocked(dashboardApi.getDashboard).mockResolvedValue(mockDashboard);
+    vi.mocked(movementsApi.getMovements).mockResolvedValue(mockMovements);
+    renderDashboard();
+    await waitFor(() => {
+      expect(screen.getByLabelText(/filter by payment method/i)).toBeInTheDocument();
+    });
+    fireEvent.change(screen.getByLabelText(/filter by payment method/i), {
+      target: { value: '2' },
+    });
+    await waitFor(() => {
+      expect(movementsApi.getMovements).toHaveBeenCalledWith(
+        expect.objectContaining({ payment_method_id: 2 })
+      );
+    });
+  });
+
+  it('clears the payment_method_id param when the filter is reset to All', async () => {
+    vi.mocked(dashboardApi.getDashboard).mockResolvedValue(mockDashboard);
+    vi.mocked(movementsApi.getMovements).mockResolvedValue(mockMovements);
+    renderDashboard();
+    await waitFor(() => {
+      expect(screen.getByLabelText(/filter by payment method/i)).toBeInTheDocument();
+    });
+    fireEvent.change(screen.getByLabelText(/filter by payment method/i), {
+      target: { value: '2' },
+    });
+    await waitFor(() => {
+      expect(movementsApi.getMovements).toHaveBeenCalledWith(
+        expect.objectContaining({ payment_method_id: 2 })
+      );
+    });
+    fireEvent.change(screen.getByLabelText(/filter by payment method/i), {
+      target: { value: '' },
+    });
+    await waitFor(() => {
+      const calls = vi.mocked(movementsApi.getMovements).mock.calls;
+      const lastCall = calls[calls.length - 1][0];
+      expect(lastCall).not.toHaveProperty('payment_method_id');
+    });
+  });
+
+  it('renders the Spend by Payment Method section when breakdown has data', async () => {
+    vi.mocked(dashboardApi.getDashboard).mockResolvedValue(mockDashboard);
+    vi.mocked(movementsApi.getMovements).mockResolvedValue(mockMovements);
+    renderDashboard();
+    await waitFor(() => {
+      expect(screen.getByText('Spend by Payment Method')).toBeInTheDocument();
+    });
+  });
+
+  it('hides the Spend by Payment Method section when breakdown is empty', async () => {
+    vi.mocked(dashboardApi.getDashboard).mockResolvedValue({
+      ...mockDashboard,
+      paymentMethodBreakdown: [],
+    });
+    vi.mocked(movementsApi.getMovements).mockResolvedValue(mockMovements);
+    renderDashboard();
+    await waitFor(() => {
+      expect(screen.getByText('Spend by Category')).toBeInTheDocument();
+    });
+    expect(screen.queryByText('Spend by Payment Method')).not.toBeInTheDocument();
   });
 
   it('shows top store in stat card', async () => {

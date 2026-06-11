@@ -9,6 +9,9 @@ node_modules/
 # Build output
 api/dist/
 client/dist/
+*.tsbuildinfo
+client/vite.config.js
+client/vite.config.d.ts
 
 # Uploads
 uploads/

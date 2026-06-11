@@ -1,8 +1,11 @@
 import { useState, useEffect, useRef } from 'react';
+import { Link } from 'react-router-dom';
 import { getCategories, Category } from '../api/categories';
 import { createMovement, updateMovement, Movement } from '../api/movements';
 import { createAttachment, deleteAttachment } from '../api/attachments';
 import { suggestCategory } from '../api/suggest';
+import { getPaymentMethods, PaymentMethod } from '../api/paymentMethods';
+import { paymentMethodIcon } from '../helpers/paymentMethod';
 
 interface Props {
   open: boolean;
@@ -26,7 +29,12 @@ export function MovementForm({ open, onClose, onSaved, movement }: Props) {
   const [store, setStore] = useState('');
   const [categoryId, setCategoryId] = useState<number | null>(null);
   const [aiSuggested, setAiSuggested] = useState(false);
+  const [suggestedNewCategory, setSuggestedNewCategory] = useState<string | null>(null);
+  const [newCategoryMode, setNewCategoryMode] = useState(false);
+  const [newCategoryName, setNewCategoryName] = useState('');
   const [categories, setCategories] = useState<Category[]>([]);
+  const [paymentMethodId, setPaymentMethodId] = useState<number | null>(null);
+  const [paymentMethods, setPaymentMethods] = useState<PaymentMethod[]>([]);
   const [files, setFiles] = useState<File[]>([]);
   const [existingAttachments, setExistingAttachments] = useState<ExistingAttachment[]>([]);
   const [errors, setErrors] = useState<Record<string, string>>({});
@@ -36,10 +44,18 @@ export function MovementForm({ open, onClose, onSaved, movement }: Props) {
 
   const suggestTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const closeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Mirrors newCategoryMode so the async suggest callback can read the
+  // current value instead of the one captured when the timer was scheduled
+  const newCategoryModeRef = useRef(false);
+
+  useEffect(() => {
+    newCategoryModeRef.current = newCategoryMode;
+  }, [newCategoryMode]);
 
   useEffect(() => {
     if (!open) return;
     getCategories().then(setCategories).catch(() => {});
+    getPaymentMethods().then(setPaymentMethods).catch(() => {});
   }, [open]);
 
   useEffect(() => {
@@ -50,6 +66,7 @@ export function MovementForm({ open, onClose, onSaved, movement }: Props) {
       setDescription(movement.description ?? '');
       setStore(movement.store ?? '');
       setCategoryId(movement.category_id);
+      setPaymentMethodId(movement.payment_method_id);
       setExistingAttachments(
         movement.attachments.map((a) => ({ id: a.id, file_name: a.file_name, url: a.url }))
       );
@@ -59,10 +76,14 @@ export function MovementForm({ open, onClose, onSaved, movement }: Props) {
       setDescription('');
       setStore('');
       setCategoryId(null);
+      setPaymentMethodId(null);
       setExistingAttachments([]);
       setFiles([]);
     }
     setAiSuggested(false);
+    setSuggestedNewCategory(null);
+    setNewCategoryMode(false);
+    setNewCategoryName('');
     setErrors({});
     setToast(null);
   }, [open, movement, today]);
@@ -84,9 +105,15 @@ export function MovementForm({ open, onClose, onSaved, movement }: Props) {
           store: storeVal.trim() || undefined,
           description: descVal.trim() || undefined,
         });
+        // A response landing after the user switched to the new-category
+        // text input must not change the category state behind it
+        if (newCategoryModeRef.current) return;
         if (result.categoryId != null) {
           setCategoryId(result.categoryId);
           setAiSuggested(true);
+          setSuggestedNewCategory(null);
+        } else {
+          setSuggestedNewCategory(result.suggestedNewCategory ?? null);
         }
       } catch {
         // ignore
@@ -111,6 +138,29 @@ export function MovementForm({ open, onClose, onSaved, movement }: Props) {
     setAiSuggested(false);
   }
 
+  function acceptNewCategory() {
+    if (!suggestedNewCategory) return;
+    setNewCategoryName(suggestedNewCategory);
+    setNewCategoryMode(true);
+    setAiSuggested(true);
+    setSuggestedNewCategory(null);
+  }
+
+  function revertToCategorySelect() {
+    setNewCategoryMode(false);
+    setNewCategoryName('');
+    setAiSuggested(false);
+  }
+
+  function handleNewCategoryNameChange(val: string) {
+    if (val === '') {
+      revertToCategorySelect();
+      return;
+    }
+    setNewCategoryName(val);
+    setAiSuggested(false);
+  }
+
   function validate(): Record<string, string> {
     const errs: Record<string, string> = {};
     const amountNum = parseFloat(amount);
@@ -131,6 +181,10 @@ export function MovementForm({ open, onClose, onSaved, movement }: Props) {
 
     setSubmitting(true);
     try {
+      const categoryPayload =
+        newCategoryMode && newCategoryName.trim()
+          ? { new_category_name: newCategoryName.trim() }
+          : { category_id: categoryId };
       let savedId: number;
       if (movement) {
         const updated = await updateMovement(movement.id, {
@@ -138,7 +192,8 @@ export function MovementForm({ open, onClose, onSaved, movement }: Props) {
           date,
           description: description || undefined,
           store: store || undefined,
-          category_id: categoryId,
+          ...categoryPayload,
+          payment_method_id: paymentMethodId,
         });
         savedId = updated.id;
       } else {
@@ -147,7 +202,8 @@ export function MovementForm({ open, onClose, onSaved, movement }: Props) {
           date,
           description: description || undefined,
           store: store || undefined,
-          category_id: categoryId,
+          ...categoryPayload,
+          payment_method_id: paymentMethodId,
         });
         savedId = created.id;
       }
@@ -320,19 +376,85 @@ export function MovementForm({ open, onClose, onSaved, movement }: Props) {
                   </span>
                 )}
               </div>
+              {newCategoryMode ? (
+                <div className="flex items-center gap-2">
+                  <input
+                    id="category"
+                    type="text"
+                    value={newCategoryName}
+                    onChange={(e) => handleNewCategoryNameChange(e.target.value)}
+                    maxLength={40}
+                    placeholder="New category name"
+                    data-testid="new-category-input"
+                    className="w-full rounded-lg border border-neutral-300 dark:border-neutral-600 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-primary-500 bg-white dark:bg-neutral-700 text-neutral-900 dark:text-white"
+                  />
+                  <button
+                    type="button"
+                    onClick={revertToCategorySelect}
+                    aria-label="Choose existing category"
+                    title="Choose an existing category instead"
+                    data-testid="new-category-toggle"
+                    className="p-1 text-neutral-400 hover:text-neutral-700 dark:hover:text-neutral-200 transition-colors"
+                  >
+                    ⌄
+                  </button>
+                </div>
+              ) : (
+                <>
+                  <select
+                    id="category"
+                    value={categoryId ?? ''}
+                    onChange={(e) => handleCategoryChange(e.target.value)}
+                    className="w-full rounded-lg border border-neutral-300 dark:border-neutral-600 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-primary-500 bg-white dark:bg-neutral-700 text-neutral-900 dark:text-white"
+                  >
+                    <option value="">No category</option>
+                    {categories.map((cat) => (
+                      <option key={cat.id} value={cat.id}>
+                        {cat.name}
+                      </option>
+                    ))}
+                  </select>
+                  {suggestedNewCategory && categoryId == null && (
+                    <button
+                      type="button"
+                      onClick={acceptNewCategory}
+                      data-testid="create-category-hint"
+                      className="mt-1 text-xs text-primary-600 hover:underline"
+                    >
+                      Create category "{suggestedNewCategory}"?
+                    </button>
+                  )}
+                </>
+              )}
+            </div>
+
+            {/* Paid with */}
+            <div>
+              <label
+                htmlFor="payment-method"
+                className="block text-sm font-medium text-neutral-700 dark:text-neutral-300 mb-1"
+              >
+                Paid with
+              </label>
               <select
-                id="category"
-                value={categoryId ?? ''}
-                onChange={(e) => handleCategoryChange(e.target.value)}
+                id="payment-method"
+                value={paymentMethodId ?? ''}
+                onChange={(e) => setPaymentMethodId(e.target.value ? Number(e.target.value) : null)}
                 className="w-full rounded-lg border border-neutral-300 dark:border-neutral-600 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-primary-500 bg-white dark:bg-neutral-700 text-neutral-900 dark:text-white"
               >
-                <option value="">No category</option>
-                {categories.map((cat) => (
-                  <option key={cat.id} value={cat.id}>
-                    {cat.name}
+                <option value="">Not specified</option>
+                {paymentMethods.map((pm) => (
+                  <option key={pm.id} value={pm.id}>
+                    {paymentMethodIcon(pm.kind)} {pm.name}
                   </option>
                 ))}
               </select>
+              <Link
+                to="/payment-methods"
+                className="mt-1 inline-block text-xs text-primary-600 hover:underline"
+              >
+                Manage payment methods
+              </Link>
             </div>
 
             {/* Attachments */}

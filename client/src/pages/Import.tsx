@@ -1,21 +1,42 @@
 import { useState, useRef, useEffect } from 'react';
-import { Category, getCategories } from '../api/categories';
+import axios from 'axios';
+import { Category, ResolvedCategory, getCategories } from '../api/categories';
 import { extractFromImage, confirmImport, ExtractedMovement, ConfirmResponse } from '../api/import';
 import { suggestCategory } from '../api/suggest';
+import {
+  PaymentMethod,
+  PaymentMethodBrand,
+  getPaymentMethods,
+  createPaymentMethod,
+} from '../api/paymentMethods';
+import { paymentMethodIcon } from '../helpers/paymentMethod';
 
 type Step = 'upload' | 'processing' | 'review' | 'confirm';
 
 interface ReviewRow {
   _key: string;
   amount: string;
+  // Amount string as it appeared on the receipt; shown in the ⚠ tooltip
+  // when the server flagged the parsed amount as suspect
+  rawAmountText: string | null;
+  amountSuspect: boolean;
   date: string;
   description: string;
   store: string;
   categoryId: number | null;
   categoryName: string | null;
   color: string | null;
+  // Non-null switches the Category cell to a free-text "new category" input
+  newCategoryName: string | null;
   aiSuggested: boolean;
   suggestLoading: boolean;
+  paymentMethodId: number | null;
+  paymentAiSuggested: boolean;
+  detectedPaymentLabel: string | null;
+  detectedBrand: string | null;
+  detectedVariant: string | null;
+  registering: boolean;
+  registerError: string | null;
 }
 
 let keyCounter = 0;
@@ -24,17 +45,28 @@ function makeKey() {
 }
 
 function movementToRow(m: ExtractedMovement): ReviewRow {
+  const suggestedNew = m.categoryId == null ? m.suggestedNewCategory ?? null : null;
   return {
     _key: makeKey(),
     amount: String(m.amount),
+    rawAmountText: m.rawAmountText ?? null,
+    amountSuspect: m.amountSuspect ?? false,
     date: m.date,
     description: m.description ?? '',
     store: m.store ?? '',
     categoryId: m.categoryId,
     categoryName: m.categoryName ?? null,
     color: m.color ?? null,
-    aiSuggested: m.aiSuggested,
+    newCategoryName: suggestedNew,
+    aiSuggested: m.aiSuggested || suggestedNew != null,
     suggestLoading: false,
+    paymentMethodId: m.paymentMethodId ?? null,
+    paymentAiSuggested: m.paymentAiSuggested ?? false,
+    detectedPaymentLabel: m.detectedPaymentLabel ?? null,
+    detectedBrand: m.detectedBrand ?? null,
+    detectedVariant: m.detectedVariant ?? null,
+    registering: false,
+    registerError: null,
   };
 }
 
@@ -42,14 +74,24 @@ function emptyRow(): ReviewRow {
   return {
     _key: makeKey(),
     amount: '',
+    rawAmountText: null,
+    amountSuspect: false,
     date: new Date().toISOString().split('T')[0],
     description: '',
     store: '',
     categoryId: null,
     categoryName: null,
     color: null,
+    newCategoryName: null,
     aiSuggested: false,
     suggestLoading: false,
+    paymentMethodId: null,
+    paymentAiSuggested: false,
+    detectedPaymentLabel: null,
+    detectedBrand: null,
+    detectedVariant: null,
+    registering: false,
+    registerError: null,
   };
 }
 
@@ -73,35 +115,56 @@ function ProcessingStageItem({ label, active, done }: { label: string; active: b
 interface ReviewRowProps {
   row: ReviewRow;
   categories: Category[];
+  paymentMethods: PaymentMethod[];
   onAmountChange: (val: string) => void;
   onDateChange: (val: string) => void;
   onDescriptionChange: (val: string) => void;
   onStoreChange: (val: string) => void;
   onCategoryChange: (id: number | null, name: string | null, color: string | null) => void;
+  onNewCategoryNameChange: (val: string) => void;
+  onRevertToSelect: () => void;
+  onPaymentMethodChange: (id: number | null) => void;
+  onRegisterCard: () => void;
   onRemove: () => void;
 }
 
 function ReviewRowComponent({
   row,
   categories,
+  paymentMethods,
   onAmountChange,
   onDateChange,
   onDescriptionChange,
   onStoreChange,
   onCategoryChange,
+  onNewCategoryNameChange,
+  onRevertToSelect,
+  onPaymentMethodChange,
+  onRegisterCard,
   onRemove,
 }: ReviewRowProps) {
   return (
     <tr className="border-b border-neutral-100 dark:border-neutral-800">
       <td className="py-1 px-2">
-        <input
-          type="number"
-          value={row.amount}
-          onChange={(e) => onAmountChange(e.target.value)}
-          placeholder="0.00"
-          aria-label="Amount"
-          className="w-24 border border-neutral-200 dark:border-neutral-700 rounded px-2 py-1 text-sm bg-white dark:bg-neutral-900 text-neutral-900 dark:text-white"
-        />
+        <div className="flex items-center gap-1">
+          <input
+            type="number"
+            value={row.amount}
+            onChange={(e) => onAmountChange(e.target.value)}
+            placeholder="0.00"
+            aria-label="Amount"
+            className="w-24 border border-neutral-200 dark:border-neutral-700 rounded px-2 py-1 text-sm bg-white dark:bg-neutral-900 text-neutral-900 dark:text-white"
+          />
+          {row.amountSuspect && (
+            <span
+              data-testid="amount-suspect-warning"
+              title={`Receipt shows "${row.rawAmountText}" — please verify`}
+              className="text-warning-600 cursor-help"
+            >
+              ⚠
+            </span>
+          )}
+        </div>
       </td>
       <td className="py-1 px-2">
         <input
@@ -133,6 +196,37 @@ function ReviewRowComponent({
         />
       </td>
       <td className="py-1 px-2">
+        {row.newCategoryName !== null ? (
+          <div className="flex items-center gap-1">
+            <input
+              type="text"
+              value={row.newCategoryName}
+              onChange={(e) => onNewCategoryNameChange(e.target.value)}
+              maxLength={40}
+              aria-label="New category name"
+              data-testid="new-category-input"
+              className="w-32 border border-neutral-200 dark:border-neutral-700 rounded px-2 py-1 text-sm bg-white dark:bg-neutral-900 text-neutral-900 dark:text-white"
+            />
+            <button
+              type="button"
+              onClick={onRevertToSelect}
+              aria-label="Choose existing category"
+              title="Choose an existing category instead"
+              data-testid="new-category-toggle"
+              className="text-neutral-400 hover:text-neutral-700 dark:hover:text-neutral-200 transition-colors leading-none"
+            >
+              ⌄
+            </button>
+            {row.aiSuggested && (
+              <span
+                data-testid="new-category-ai-badge"
+                className="text-xs text-primary-600 font-medium whitespace-nowrap"
+              >
+                ✦ AI suggested
+              </span>
+            )}
+          </div>
+        ) : (
         <div className="flex items-center gap-1">
           <select
             value={row.categoryId ?? ''}
@@ -170,6 +264,51 @@ function ReviewRowComponent({
             </span>
           )}
         </div>
+        )}
+      </td>
+      <td className="py-1 px-2">
+        <div className="flex items-center gap-1">
+          <select
+            value={row.paymentMethodId ?? ''}
+            onChange={(e) => onPaymentMethodChange(e.target.value ? Number(e.target.value) : null)}
+            aria-label="Paid with"
+            className="border border-neutral-200 dark:border-neutral-700 rounded px-2 py-1 text-sm bg-white dark:bg-neutral-900 text-neutral-900 dark:text-white"
+          >
+            <option value="">No payment method</option>
+            {paymentMethods.map((pm) => (
+              <option key={pm.id} value={pm.id}>
+                {paymentMethodIcon(pm.kind)} {pm.name}
+              </option>
+            ))}
+          </select>
+          {row.paymentAiSuggested && (
+            <span
+              data-testid="payment-ai-badge"
+              className="text-xs text-primary-600 font-medium whitespace-nowrap"
+            >
+              ✦ AI detected
+            </span>
+          )}
+        </div>
+        {row.detectedPaymentLabel && row.paymentMethodId == null && (
+          <div className="mt-1 text-xs text-neutral-500 dark:text-neutral-400 whitespace-nowrap">
+            Detected "{row.detectedPaymentLabel}" —{' '}
+            <button
+              type="button"
+              onClick={onRegisterCard}
+              disabled={row.registering}
+              data-testid="register-card-button"
+              className="text-primary-600 hover:text-primary-700 font-medium disabled:opacity-50"
+            >
+              {row.registering ? 'Registering...' : 'Register this card?'}
+            </button>
+            {row.registerError && (
+              <p data-testid="register-card-error" className="mt-0.5 text-danger-600">
+                {row.registerError}
+              </p>
+            )}
+          </div>
+        )}
       </td>
       <td className="py-1 px-2">
         <button
@@ -195,10 +334,12 @@ export function Import() {
   const [rows, setRows] = useState<ReviewRow[]>([]);
   const [attachmentId, setAttachmentId] = useState<number | undefined>();
   const [categories, setCategories] = useState<Category[]>([]);
+  const [paymentMethods, setPaymentMethods] = useState<PaymentMethod[]>([]);
   const [extractError, setExtractError] = useState<string | null>(null);
   const [confirming, setConfirming] = useState(false);
   const [confirmError, setConfirmError] = useState<string | null>(null);
   const [created, setCreated] = useState<ConfirmResponse['created'] | null>(null);
+  const [resolvedCategories, setResolvedCategories] = useState<ResolvedCategory[]>([]);
 
   const fileInputRef = useRef<HTMLInputElement>(null);
   const suggestTimers = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map());
@@ -206,6 +347,7 @@ export function Import() {
 
   useEffect(() => {
     getCategories().then(setCategories).catch(() => {});
+    getPaymentMethods().then(setPaymentMethods).catch(() => {});
   }, []);
 
   useEffect(() => {
@@ -288,17 +430,36 @@ export function Import() {
           store: store.trim() || undefined,
           description: description.trim() || undefined,
         });
-        if (result.categoryId != null) {
-          updateRow(key, {
-            categoryId: result.categoryId,
-            categoryName: result.categoryName ?? null,
-            color: result.color ?? null,
-            aiSuggested: true,
-            suggestLoading: false,
-          });
-        } else {
-          updateRow(key, { suggestLoading: false });
-        }
+        setRows((prev) =>
+          prev.map((r) => {
+            if (r._key !== key) return r;
+            // A response landing after the user switched this cell to the
+            // new-category text input must not overwrite their text
+            if (r.newCategoryName !== null) return { ...r, suggestLoading: false };
+            if (result.categoryId != null) {
+              return {
+                ...r,
+                categoryId: result.categoryId,
+                categoryName: result.categoryName ?? null,
+                color: result.color ?? null,
+                aiSuggested: true,
+                suggestLoading: false,
+              };
+            }
+            if (result.suggestedNewCategory) {
+              return {
+                ...r,
+                categoryId: null,
+                categoryName: null,
+                color: null,
+                newCategoryName: result.suggestedNewCategory,
+                aiSuggested: true,
+                suggestLoading: false,
+              };
+            }
+            return { ...r, suggestLoading: false };
+          })
+        );
       } catch {
         updateRow(key, { suggestLoading: false });
       }
@@ -319,6 +480,42 @@ export function Import() {
     if (row) scheduleRowSuggest(key, row.store, value);
   }
 
+  function handleRowNewCategoryNameChange(key: string, value: string) {
+    // Clearing the text reverts the cell to the existing-categories select
+    updateRow(key, { newCategoryName: value === '' ? null : value, aiSuggested: false });
+  }
+
+  async function handleRegisterCard(key: string) {
+    const row = rows.find((r) => r._key === key);
+    if (!row?.detectedPaymentLabel) return;
+    updateRow(key, { registering: true, registerError: null });
+    try {
+      const created = await createPaymentMethod({
+        name: row.detectedPaymentLabel,
+        kind: 'card',
+        brand: (row.detectedBrand as PaymentMethodBrand | null) ?? undefined,
+        variant: row.detectedVariant ?? undefined,
+      });
+      setPaymentMethods((prev) =>
+        [...prev, created].sort((a, b) => a.name.localeCompare(b.name))
+      );
+      updateRow(key, {
+        paymentMethodId: created.id,
+        detectedPaymentLabel: null,
+        detectedBrand: null,
+        detectedVariant: null,
+        registering: false,
+        registerError: null,
+      });
+    } catch (err) {
+      const message =
+        axios.isAxiosError(err) && typeof err.response?.data?.error === 'string'
+          ? err.response.data.error
+          : 'Could not register the card. Please try again.';
+      updateRow(key, { registering: false, registerError: message });
+    }
+  }
+
   function addRow() {
     setRows((prev) => [...prev, emptyRow()]);
   }
@@ -333,16 +530,39 @@ export function Import() {
     try {
       const movements = rows
         .filter((r) => r.amount.trim() !== '')
-        .map((r) => ({
-          amount: Number(r.amount),
-          date: r.date,
-          description: r.description || undefined,
-          store: r.store || undefined,
-          category_id: r.categoryId ?? null,
-        }));
+        .map((r) => {
+          const base = {
+            amount: Number(r.amount),
+            date: r.date,
+            description: r.description || undefined,
+            store: r.store || undefined,
+            payment_method_id: r.paymentMethodId ?? null,
+          };
+          const newName = r.newCategoryName?.trim();
+          return newName
+            ? { ...base, new_category_name: newName }
+            : { ...base, category_id: r.categoryId ?? null };
+        });
 
       const result = await confirmImport({ attachmentId, movements });
       setCreated(result.created);
+      setResolvedCategories(result.resolvedCategories ?? []);
+      if (result.resolvedCategories?.length) {
+        setCategories((prev) => {
+          const known = new Set(prev.map((c) => c.id));
+          const added = result.resolvedCategories
+            .filter((rc) => !known.has(rc.id))
+            .map((rc) => ({
+              id: rc.id,
+              name: rc.name,
+              color: rc.color,
+              icon: null,
+              movement_count: 0,
+              created_at: new Date().toISOString(),
+            }));
+          return [...prev, ...added].sort((a, b) => a.name.localeCompare(b.name));
+        });
+      }
       setStep('confirm');
     } catch {
       setConfirmError('Failed to import movements. Please try again.');
@@ -486,6 +706,7 @@ export function Import() {
                   </th>
                   <th className="py-2 px-2 text-left font-medium text-neutral-600 dark:text-neutral-400">Store</th>
                   <th className="py-2 px-2 text-left font-medium text-neutral-600 dark:text-neutral-400">Category</th>
+                  <th className="py-2 px-2 text-left font-medium text-neutral-600 dark:text-neutral-400">Paid with</th>
                   <th className="py-2 px-2" />
                 </tr>
               </thead>
@@ -495,13 +716,22 @@ export function Import() {
                     key={row._key}
                     row={row}
                     categories={categories}
-                    onAmountChange={(val) => updateRow(row._key, { amount: val })}
+                    paymentMethods={paymentMethods}
+                    onAmountChange={(val) => updateRow(row._key, { amount: val, amountSuspect: false })}
                     onDateChange={(val) => updateRow(row._key, { date: val })}
                     onDescriptionChange={(val) => handleRowDescriptionChange(row._key, val)}
                     onStoreChange={(val) => handleRowStoreChange(row._key, val)}
                     onCategoryChange={(id, name, color) =>
                       updateRow(row._key, { categoryId: id, categoryName: name, color, aiSuggested: false })
                     }
+                    onNewCategoryNameChange={(val) => handleRowNewCategoryNameChange(row._key, val)}
+                    onRevertToSelect={() =>
+                      updateRow(row._key, { newCategoryName: null, aiSuggested: false })
+                    }
+                    onPaymentMethodChange={(id) =>
+                      updateRow(row._key, { paymentMethodId: id, paymentAiSuggested: false })
+                    }
+                    onRegisterCard={() => handleRegisterCard(row._key)}
                     onRemove={() => removeRow(row._key)}
                   />
                 ))}
@@ -556,18 +786,64 @@ export function Import() {
         <p className="text-neutral-600 dark:text-neutral-400 mb-4">
           Successfully imported {created?.length ?? 0} movement{(created?.length ?? 0) !== 1 ? 's' : ''}.
         </p>
+        {resolvedCategories.some((c) => c.created) && (
+          <div
+            data-testid="new-categories-summary"
+            className="mb-4 p-3 bg-white dark:bg-neutral-800 rounded-lg border border-neutral-200 dark:border-neutral-700"
+          >
+            <p className="text-sm text-neutral-600 dark:text-neutral-400">New categories created:</p>
+            <div className="mt-2 flex flex-wrap gap-2">
+              {resolvedCategories
+                .filter((c) => c.created)
+                .map((c) => (
+                  <span
+                    key={c.id}
+                    className="inline-flex items-center gap-1.5 text-xs text-neutral-700 dark:text-neutral-300 bg-neutral-100 dark:bg-neutral-700 rounded-full px-2 py-0.5"
+                  >
+                    <span
+                      data-testid="new-category-swatch"
+                      className="w-3 h-3 rounded-full inline-block"
+                      style={{ backgroundColor: c.color ?? '#9ca3af' }}
+                    />
+                    {c.name}
+                  </span>
+                ))}
+            </div>
+          </div>
+        )}
         <ul className="space-y-2">
-          {created?.map((m) => (
-            <li
-              key={m.id}
-              className="flex items-center justify-between p-3 bg-white dark:bg-neutral-800 rounded-lg border border-neutral-200 dark:border-neutral-700"
-            >
-              <span className="text-sm text-neutral-700 dark:text-neutral-300">{m.description || m.date}</span>
-              <span className="font-medium text-neutral-900 dark:text-white">
-                ${Number(m.amount).toFixed(2)}
-              </span>
-            </li>
-          ))}
+          {created?.map((m) => {
+            const pm = m.payment_method_id != null
+              ? paymentMethods.find((p) => p.id === m.payment_method_id)
+              : undefined;
+            return (
+              <li
+                key={m.id}
+                className="flex items-center justify-between gap-3 p-3 bg-white dark:bg-neutral-800 rounded-lg border border-neutral-200 dark:border-neutral-700"
+              >
+                <div className="flex items-center gap-3 min-w-0">
+                  <span className="text-sm text-neutral-700 dark:text-neutral-300 truncate">
+                    {m.description || m.date}
+                  </span>
+                  <span className="text-xs text-neutral-500 whitespace-nowrap">{m.date}</span>
+                  {m.store && (
+                    <span className="text-xs text-neutral-500 truncate">{m.store}</span>
+                  )}
+                  {pm && (
+                    <span
+                      data-testid="summary-payment-method"
+                      className="inline-flex items-center gap-1 text-xs text-neutral-600 dark:text-neutral-300 bg-neutral-100 dark:bg-neutral-700 rounded-full px-2 py-0.5 whitespace-nowrap"
+                    >
+                      {paymentMethodIcon(pm.kind)} {pm.name}
+                    </span>
+                  )}
+                </div>
+                <span className="font-medium text-neutral-900 dark:text-white whitespace-nowrap">
+                  ${Number(m.amount).toFixed(2)}
+                </span>
+              </li>
+            );
+          })}
         </ul>
         <a
           href="/"

@@ -1,206 +1,121 @@
 [
   {
     "category": "functional",
-    "description": "Bootstrap the Node.js/Express API server",
+    "description": "Create the payment methods data model and CRUD API",
     "steps": [
-      "Scaffold an Express project with TypeScript inside an `api/` directory; configure `tsconfig.json`, `nodemon` for development restarts, and a `build` script that compiles to `dist/`",
-      "Load environment variables with `dotenv` for DATABASE_URL, PORT, UPLOAD_DIR, and CLAUDE_MODEL; provide a committed `.env.example` listing every required variable",
-      "Add CORS middleware allowing the local Vite dev origin and configure it to restrict origins in production via an env variable",
-      "Mount a `GET /health` endpoint that returns `{ status: 'ok', timestamp }` and the server version so deploy pipelines can verify liveness",
-      "Add `morgan` or `pino` for structured HTTP request logging; verify the server starts cleanly on the configured port with a startup log line"
+      "Create migration `005_create-payment-methods.js`: table `payment_methods` — `id` (serial PK), `name` (text, unique, not null — e.g. 'Visa Platinum DAVIbank'), `kind` (text, not null, CHECK in 'card' | 'cash' | 'bank_transfer' | 'other'), `brand` (text, nullable — 'visa' | 'mastercard' | 'amex' | 'other'), `variant` (text, nullable — e.g. 'platinum', 'black', 'gold', 'classic'), `last4` (char(4), nullable), `created_at` (timestamptz default now); seed one default row: name 'Cash', kind 'cash'",
+      "Create migration `006_add-payment-method-to-movements.js`: add `payment_method_id` (int, nullable, FK → payment_methods ON DELETE SET NULL) to the `movements` table",
+      "`GET /api/payment-methods` — return all methods ordered by name, each with a `movement_count` computed via left join; `POST /api/payment-methods` — create with zod validation: `name` required and unique, `kind` required enum, `brand`/`variant` optional strings, `last4` optional and must be exactly 4 digits when provided",
+      "`PUT /api/payment-methods/:id` — partial update with the same validation rules, 409 on name collision excluding self; `DELETE /api/payment-methods/:id` — 409 if any movement references the method, otherwise hard-delete and return 204 (mirror the categories API semantics and `{ error, details? }` error shape)",
+      "Tests covering CRUD happy paths, name uniqueness, kind enum rejection, last4 format validation, and FK-blocked delete — same Docker test DB pattern as existing suites"
     ],
     "passes": true
   },
   {
     "category": "functional",
-    "description": "Set up PostgreSQL database schema and migrations",
+    "description": "Wire payment methods through the movements and dashboard APIs",
     "steps": [
-      "Configure a `pg` connection pool using `DATABASE_URL`; use `node-pg-migrate` (or `knex`) as the migration runner and wire a `npm run migrate` script",
-      "Create the `categories` table: `id` (serial PK), `name` (text, unique, not null), `color` (text, hex code), `icon` (text, optional emoji/slug), `created_at` (timestamptz default now)",
-      "Create the `movements` table: `id` (serial PK), `amount` (numeric(12,2), not null), `date` (date, not null), `description` (text), `store` (text), `category_id` (FK → categories, nullable), `created_at` / `updated_at` (timestamptz)",
-      "Create the `attachments` table: `id` (serial PK), `movement_id` (FK → movements, nullable — null before import confirmation), `file_name` (text), `file_path` (text), `mime_type` (text), `created_at` (timestamptz)",
-      "Add a seed migration that inserts default categories: Food, Transport, Entertainment, Health, Utilities, Shopping, Other — each with a distinct color"
+      "Update `GET /api/movements` and `GET /api/movements/:id` to join `payment_methods` and include a `payment_method` object (`{ id, name, kind, brand, variant }` or null) on each returned movement",
+      "Update `POST /api/movements` and `PUT /api/movements/:id` zod schemas to accept an optional nullable `payment_method_id`; validate the referenced method exists when provided; include it in the dynamic SET clause on PUT (supporting explicit null to clear it)",
+      "Add a `payment_method_id` filter query param to `GET /api/movements`, chained with the existing from/to/category_id/store/search filters",
+      "Update `GET /api/dashboard` to also return `paymentMethodBreakdown: [{ paymentMethodId, name, kind, total, percentage }]` for the selected period, computed with GROUP BY in the same CTE round-trip style as `categoryBreakdown`",
+      "Update the `POST /api/import/confirm` zod schema (`movementItemSchema`) to accept an optional `payment_method_id` per item, validate it exists alongside the existing category_id check, and persist it in the bulk-insert transaction"
     ],
     "passes": true
   },
   {
-    "category": "functional",
-    "description": "Implement the categories REST API",
+    "category": "ui",
+    "description": "Build the payment method management screen",
     "steps": [
-      "`GET /api/categories` — return all categories ordered by name, each with a `movement_count` computed via a left join",
-      "`POST /api/categories` — create a category; validate `name` (required, unique) and `color` (optional, must be a valid hex string if provided)",
-      "`PUT /api/categories/:id` — update name, color, or icon; re-validate uniqueness excluding the current row",
-      "`DELETE /api/categories/:id` — reject with 409 if any movement references the category; otherwise hard-delete and return 204",
-      "Return a consistent error shape `{ error: string, details?: Record<string, string> }` for all validation failures and use appropriate HTTP status codes throughout"
+      "Add a `/payment-methods` route and a 'Payment Methods' link in the persistent nav; render a list of all methods where each row shows a kind/brand icon (💵 cash, 💳 card with brand label, 🏦 transfer), the name, brand + variant chips, `last4` rendered as '•••• 1234' when set, and a movement count badge",
+      "Provide an 'Add Payment Method' inline form at the top: name input, kind select; when kind is 'card', reveal brand select (Visa, Mastercard, Amex, Other), variant text input (e.g. Platinum, Black, Gold), and an optional last-4-digits input; submit calls POST /api/payment-methods",
+      "Allow in-place editing of name, brand, variant, and last4 via an edit icon on the row; save on blur or Enter (mirror the categories screen interaction)",
+      "Show a delete icon per row with a confirmation popover; disable it with an explanatory tooltip showing the movement count when movements are linked; the seeded 'Cash' row is editable and deletable like any other",
+      "When only the seeded Cash method exists, show a prompt card: 'Register your first card to track how you pay' with the add form focused"
     ],
     "passes": true
   },
   {
-    "category": "functional",
-    "description": "Implement the expense movements REST API",
+    "category": "ui",
+    "description": "Add payment method to the movement form and dashboard",
     "steps": [
-      "`GET /api/movements` — accept filter query params (`from`, `to` date range; `category_id`; `store`; `search` for description/store full-text); return paginated results (`page`, `limit`) with `total` count and each movement's attached files",
-      "`GET /api/movements/:id` — return a single movement joined with its category and its attachments array",
-      "`POST /api/movements` — create a movement; validate `amount` (positive number) and `date` (ISO date string, defaults to today if omitted); `category_id`, `description`, and `store` are optional",
-      "`PUT /api/movements/:id` — update any movement field; re-validate the same rules as POST",
-      "`DELETE /api/movements/:id` — delete the movement, its attachment records, and each attachment file from disk; return 204"
-    ],
-    "passes": true
-  },
-  {
-    "category": "functional",
-    "description": "Handle file attachment uploads and serving",
-    "steps": [
-      "Configure `multer` with a disk storage engine that saves files under `UPLOAD_DIR/<YYYY-MM>/`; restrict accepted MIME types to `image/jpeg`, `image/png`, `image/webp`, and `application/pdf`; cap individual file size at 10 MB",
-      "`POST /api/attachments` — accept a multipart upload with `file` and an optional `movement_id`; persist a row to `attachments` and return the created record including a public URL",
-      "`DELETE /api/attachments/:id` — remove the DB row and delete the file from disk; return 204",
-      "Mount a static route so uploaded files are accessible at `GET /uploads/<relative-path>` with correct `Content-Type` headers",
-      "Return a 400 with a human-readable message for unsupported file types or size-exceeded errors; never leave orphan files on disk when a DB insert fails"
+      "Add a 'Paid with' select to `MovementForm.tsx` between Category and Attachments, populated from `GET /api/payment-methods` with the kind/brand icon per option; optional field, defaults to unset; include a 'Manage payment methods' link beneath it pointing to `/payment-methods`",
+      "Pre-populate the select in edit mode from the movement's `payment_method_id`; submitting sends `payment_method_id` (or null) with the create/update payload",
+      "Show a compact payment method badge (icon + short name) on each row of the Recent Movements list on the Dashboard, beside the amount; omit the badge when the movement has no payment method",
+      "Add a payment method filter dropdown to the dashboard's Recent Movements section that sets the `payment_method_id` param on `GET /api/movements`; 'All' clears the filter",
+      "Render a 'Spend by Payment Method' horizontal bar chart (Recharts) under the category donut using `paymentMethodBreakdown` from the dashboard API; hide the section entirely when the breakdown is empty"
     ],
     "passes": true
   },
   {
     "category": "integration",
-    "description": "Suggest a matching category for a movement using AI",
+    "description": "Detect the card used from receipt text during OCR extraction",
     "steps": [
-      "Add `POST /api/suggest/category` — accept `{ store?, description? }` (at least one field required); return 400 with a clear message if both are absent",
-      "Fetch all categories from the DB, then call the OpenRouter chat completions endpoint via the `openai` npm package (baseURL `https://openrouter.ai/api/v1`, key from `OPENROUTER_API_KEY`) passing the store name, description, and the full category list; use `response_format: { type: 'json_object' }` and prompt the model to return `{ categoryId: number | null, reason: string }` — `null` when no category fits well",
-      "Use the model name from `OPENROUTER_MODEL` env var (default: `anthropic/claude-haiku-4-5`) with a hard timeout of 3 seconds and `temperature: 0` for deterministic output; on timeout or unparseable JSON return `{ categoryId: null }` without throwing — the caller must never be blocked",
-      "Return `{ categoryId, categoryName, color }` sourced from the matched DB row so the frontend can update the select without a second round-trip; return `{ categoryId: null }` when the model finds no confident match",
-      "Extract a shared `suggestCategory(store, description)` helper function from this handler so it can be called internally (e.g. from the OCR extraction pipeline) without an extra HTTP hop"
+      "In `POST /api/import/extract`, fetch the user's registered payment methods and include them in the extraction prompt as a list of `{ id, name, kind, brand, variant }`; instruct the model to return per movement a `paymentMethodId` matching one of the registered methods when the text identifies it (e.g. 'tarjeta Visa Platinum' in a DAVIbank notification matches a registered Visa Platinum card), matching on brand + variant even when the registered name differs",
+      "When the text clearly mentions a card but none of the registered methods match, instruct the model to instead return `detectedPaymentLabel` (the raw detected string, e.g. 'Visa Platinum') plus parsed `detectedBrand` and `detectedVariant`, leaving `paymentMethodId` null; when no payment signal exists in the text, all of these are null",
+      "Include bilingual cues in the prompt — Spanish bank notification vocabulary ('tarjeta', 'compra', 'débito', 'crédito', 'efectivo') alongside English — since receipts and bank emails arrive in both languages",
+      "Defend server-side: validate any returned `paymentMethodId` against the registered list and null it out if unknown; normalize `detectedBrand` to the canonical enum values before returning",
+      "Return `paymentMethodId`, `paymentMethodName`, `detectedPaymentLabel`, `detectedBrand`, `detectedVariant`, and `paymentAiSuggested: true/false` on each movement in the extract response; never persist at this stage — persistence happens through `POST /api/import/confirm` which already accepts `payment_method_id`"
+    ],
+    "passes": true
+  },
+  {
+    "category": "ui",
+    "description": "Payment method column in the OCR import review table",
+    "steps": [
+      "Add a 'Paid with' column to the editable review table at `/import` (Step 3): a select populated from `GET /api/payment-methods`, pre-selected from the movement's `paymentMethodId` when the AI matched a registered method, with a ✦ 'AI detected' badge beside it",
+      "When the extract response carries a `detectedPaymentLabel` with no `paymentMethodId` (unregistered card), show an inline prompt in the cell: 'Detected \"Visa Platinum\" — Register this card?'; clicking it POSTs to `/api/payment-methods` (kind 'card', name/brand/variant from the detected values), refreshes the select options, and selects the newly created method in that row",
+      "Manually changing the select clears the ✦ badge for that row, consistent with the category override behavior",
+      "Include each row's `payment_method_id` in the `POST /api/import/confirm` payload",
+      "Show the payment method (icon + name) for each created movement in the import success summary card, alongside date, store, and amount"
     ],
     "passes": true
   },
   {
     "category": "integration",
-    "description": "Extract expense data from images using OCR and AI",
+    "description": "Second-pass category suggestion when no existing category matches",
     "steps": [
-      "`POST /api/import/extract` — accept a single image upload (JPEG, PNG, PDF); save it as a temporary attachment row with `movement_id = null`",
-      "Run `tesseract` CLI (via `child_process.execFile`) on the uploaded image with the `eng` language model to produce raw extracted text; surface a clear error if `tesseract` is not installed",
-      "Build a structured prompt containing the raw OCR text and call the OpenRouter chat completions endpoint (same `openai` client used by the category suggester) requesting a JSON array of movement objects: `{ amount, date, description, store }`; use `OPENROUTER_MODEL` with `response_format: { type: 'json_object' }` and a short timeout",
-      "After parsing the movements array, call the shared `suggestCategory(store, description)` helper for each movement in parallel; attach the resolved `{ categoryId, categoryName, color, aiSuggested: true }` to each movement object before returning",
-      "Return the response payload `{ attachmentId, rawText, movements: [...] }` to the caller; if Claude is unavailable or returns unparseable JSON, return `{ attachmentId, rawText, movements: [], error: 'AI extraction failed' }` so the UI can fall back to manual entry; never persist movement rows at this stage"
-    ],
-    "passes": true
-  },
-  {
-    "category": "functional",
-    "description": "Import preview confirmation: bulk-create reviewed movements",
-    "steps": [
-      "`POST /api/import/confirm` — accept `{ attachmentId, movements: [...] }` where `movements` is the user-reviewed array of movement objects",
-      "Validate every movement in the array (amount positive, date valid, category_id exists if provided) before persisting any; return per-item errors if validation fails without creating anything",
-      "Insert all movements in a single database transaction; link `attachmentId` to each created movement by setting `movement_id` on the attachment row",
-      "Return `{ created: [{ id, amount, date, description }], count: N }` on success so the UI can navigate to the newly created records",
-      "If `attachmentId` is not provided or the attachment row is not found, still proceed with movement creation but skip the attachment link step"
-    ],
-    "passes": true
-  },
-  {
-    "category": "functional",
-    "description": "Provide aggregate data API for dashboard charts",
-    "steps": [
-      "`GET /api/dashboard` — accept `period` (day | week | month | year | all) and optional `anchor` (ISO date, defaults to today); compute the inclusive date range for the requested period",
-      "Return `{ totalAmount, movementCount, categoryBreakdown: [{ categoryId, name, color, total, percentage }], timeSeries: [{ label, total }] }` where `timeSeries` buckets are hours for day, days for week/month, and months for year/all",
-      "Compute all aggregates in a single PostgreSQL query using `DATE_TRUNC` and `GROUP BY` to avoid N+1 queries; include empty buckets (zero-amount) so charts render continuous axes",
-      "Include `previousPeriod: { totalAmount, movementCount }` for the preceding equivalent range so the frontend can render trend deltas",
-      "Return `topStore` (the store with the highest spend in the period) alongside the aggregates"
-    ],
-    "passes": true
-  },
-  {
-    "category": "functional",
-    "description": "Bootstrap the React frontend application",
-    "steps": [
-      "Scaffold a React + TypeScript project with Vite inside a `client/` directory; configure the Vite dev server to proxy `/api` and `/uploads` requests to the Express server port",
-      "Add Tailwind CSS with a custom color palette that includes tokens for primary, success, warning, danger, and neutral scales; configure dark-mode support via the `class` strategy",
-      "Set up React Router v6 with routes for `/` (Dashboard), `/import` (OCR Import), and `/categories` (Category Management); add a persistent top navigation bar with links to each route",
-      "Add `axios` (or `fetch`-based) API client utilities organized by resource (`movements`, `categories`, `dashboard`, `import`) with shared error handling that surfaces API `error` payloads as typed exceptions",
-      "Configure ESLint and Prettier to match the API project; add a root-level `package.json` with scripts: `dev` (runs API + Vite concurrently), `build` (Vite build + API tsc), `start` (production Express serving the React build), `migrate`"
+      "Update the `suggestCategory` helper: when the first pass returns `categoryId: null`, make a second OpenRouter call asking the model to propose a concise new category name (1–2 words, capitalized, in the user's catalog language) that would fit the movement — e.g. 'Software' or 'AI Services' for an OPENROUTER, INC purchase; return `{ categoryId: null, suggestedNewCategory: string | null }`; keep the existing never-throw and timeout guarantees across both passes",
+      "Include `suggestedNewCategory` in the `POST /api/suggest/category` response and on each movement returned by `POST /api/import/extract`; deduplicate second-pass calls within one extraction batch via an in-process cache keyed by (store, description) so identical rows don't trigger duplicate LLM calls",
+      "Update `POST /api/movements`, `PUT /api/movements/:id`, and `POST /api/import/confirm` to accept an optional `new_category_name` (string, 1–40 chars) that is mutually exclusive with `category_id` — reject with 400 if both are provided",
+      "When `new_category_name` is provided, find-or-create the category case-insensitively inside the same transaction as the movement write: reuse an existing category on name match, otherwise create one with an auto-assigned color picked from the preset palette excluding colors already in use",
+      "Return the resolved category (`{ id, name, color, created: boolean }`) in the response so the UI can update its category list without a refetch; tests cover find-vs-create, case-insensitive matching, color auto-assignment, and the mutual-exclusion validation"
     ],
     "passes": true
   },
   {
     "category": "ui",
-    "description": "Build the dashboard page with expense summary and charts",
+    "description": "Editable AI-suggested new category field",
     "steps": [
-      "Lay out a summary row at the top showing three stat cards: Total Spend, Number of Movements, and Top Category — each with a label, formatted value, and a trend indicator (▲/▼ vs. the previous period)",
-      "Render a donut/pie chart of spend by category using Recharts; display the category name, color swatch, total, and percentage in a legend beside the chart; show a 'No data' illustration when the period has no movements",
-      "Render a bar chart of spend over time (sub-period buckets returned by the dashboard API) below the donut; label the x-axis with readable date labels appropriate to the period (e.g. 'Mon', 'Jan 5', 'Feb')",
-      "Show a 'Recent Movements' list below the charts with columns: date, store/description, category badge, and amount; link each row to open an edit form",
-      "Show skeleton loaders while data is fetching; show a full-page empty state with a call-to-action to add the first movement when there are no records at all"
+      "In the import review table, when a row has `categoryId: null` and a `suggestedNewCategory`, render the Category cell as an editable text input pre-filled with the suggestion and a ✦ 'AI suggested' badge, instead of the bare 'No category' select",
+      "Let the user freely edit the suggested word or type their own; provide a small toggle (⌄ icon) to switch the cell back to the existing-categories select if they'd rather pick one; clearing the text field also reverts to the select",
+      "On 'Import N Movements', rows with a filled text field send `new_category_name` (and no `category_id`) to `POST /api/import/confirm`; the success summary shows each newly created category with its auto-assigned color swatch",
+      "Apply the same pattern in `MovementForm`: when the debounced suggestion call returns `categoryId: null` with a `suggestedNewCategory`, show an inline 'Create category \"Software\"?' hint under the Category select; accepting switches the select to a text input pre-filled with the suggestion, and submit sends `new_category_name`",
+      "After a successful import or save that created categories, the new categories appear in the `/categories` management screen and in all category selects without a full page reload"
     ],
     "passes": true
   },
   {
-    "category": "ui",
-    "description": "Add a time period selector to the dashboard",
+    "category": "integration",
+    "description": "Clean, context-aware description extraction",
     "steps": [
-      "Render a segmented control (tab strip) with five options: Day | Week | Month | Year | All; default to Month on first load",
-      "For Day, Week, Month, and Year periods render previous/next arrow buttons flanking a human-readable label (e.g. 'June 2026', 'Week of Jun 2–8', 'Monday Jun 9'); the All period hides the arrows",
-      "Clicking a period segment or the prev/next arrows updates the `period` and `anchor` URL query params; the component reads them on mount so the URL is bookmarkable",
-      "Debounce rapid prev/next clicks (e.g. 150 ms) to avoid flooding the API; show an inline spinner on the stat cards while the new period is loading without clearing the previous chart data",
-      "Disable the 'next' arrow when the anchor would advance past today"
+      "Rewrite the extraction and suggestion prompts with explicit description rules: the description must say what was purchased or what the merchant sells, NEVER the payment instrument — forbid card/payment vocabulary ('visa', 'mastercard', 'amex', 'platinum', 'black', 'gold', 'tarjeta', 'card', 'cash', 'efectivo', 'débito', 'crédito', 'transaction', 'compra') and bank-notification boilerplate; for bank notification emails (like DAVIbank purchase alerts) the description must describe the merchant's product or service, not the notification itself",
+      "Add a server-side sanitizer as defense-in-depth: after the model returns, strip any description that is predominantly payment vocabulary (regex over the forbidden term list); when sanitizing empties the description, fall back to a cleaned store name so the field is never a payment method",
+      "Add historical context: in `POST /api/import/extract` and the description path of the suggest helpers, query up to 10 most recent distinct descriptions the user previously saved for the same store and include them in the prompt as 'descriptions this user previously wrote for this store' — preferring consistency with the user's own wording",
+      "Add web enrichment for unknown stores: create migration `007_create-store-context.js` — table `store_context` (`store` text PK normalized lowercase, `summary` text, `fetched_at` timestamptz); when a store has no prior movements and no cached context, make one OpenRouter call with the web search plugin (append `:online` to the model slug) asking for a one-sentence summary of what the merchant sells, store the result, and skip silently on timeout or failure (5-second cap) — each store is searched at most once, ever",
+      "Inject the cached `store_context.summary` into both the description prompt and the `suggestCategory` prompt so category matching benefits from the same knowledge (e.g. 'OPENROUTER, INC — AI model API provider' resolves both 'AI Services' category and a sane description); tests mock the web-enabled call and assert the cache prevents repeat searches"
     ],
     "passes": true
   },
   {
-    "category": "ui",
-    "description": "Build the expense movement registration form",
+    "category": "integration",
+    "description": "Locale-aware amount separator parsing during OCR extraction",
     "steps": [
-      "Open a slide-over panel or modal from a prominent '+ Add Expense' button fixed to the top-right of the dashboard; the panel should not navigate away from the current view",
-      "Form fields: Amount (number input, required, formatted with locale currency), Date (date picker defaulting to today, required, editable), Description (text), Store (text), Category (select populated from GET /api/categories with a colored badge per option), Attachments (multi-file input accepting images and PDFs)",
-      "After the user types or blurs from the Store or Description field, fire a debounced call (400 ms) to `POST /api/suggest/category`; while the request is in flight show a subtle spinner icon inside the Category select; on response pre-select the returned category and display a small ✦ 'AI suggested' badge beside the select label — the user can always override by picking a different option, which clears the badge",
-      "On submit, POST the movement fields to `/api/movements`, then POST each selected file to `/api/attachments` with the returned `movement_id`; show a per-file upload progress indicator",
-      "Display inline field-level validation errors (missing amount, invalid date, etc.) before the network call; show a success toast and close the panel on completion; show an error toast if the API returns an error",
-      "Support editing an existing movement: pre-populate all fields from the movement record, show existing attachments as thumbnails with a remove button (calls DELETE /api/attachments/:id), and PATCH the movement on save"
-    ],
-    "passes": true
-  },
-  {
-    "category": "ui",
-    "description": "Build the OCR-assisted image import flow",
-    "steps": [
-      "Step 1 — Upload: at `/import`, render a centered drop zone that accepts drag-and-drop or click-to-browse for a single JPEG, PNG, or PDF file; show a thumbnail preview after selection and a 'Process Image' button",
-      "Step 2 — Processing: on clicking 'Process Image', POST to `/api/import/extract`; display a multi-stage progress indicator ('Extracting text…', 'Analyzing with AI…') and show the raw extracted text in a collapsible panel for debugging",
-      "Step 3 — Review: render an editable table of extracted movements — one row per movement with inline-editable cells for Amount, Date, Description, Store, and Category (select); Category cells that were pre-filled by AI show a ✦ 'AI suggested' badge; changing Store or Description in a row fires the same debounced `POST /api/suggest/category` call used by the manual form, updating the suggestion in real time; allow adding blank rows and removing any row; show the uploaded image in a side panel so the user can cross-check",
-      "Step 4 — Confirm: a 'Import N Movements' button posts the reviewed array to `/api/import/confirm`; on success show a summary card listing each created movement with a link to view it on the dashboard",
-      "Error handling: if extraction fails (OCR error or AI unavailable), display the raw text with a notice explaining the AI could not parse it, and let the user fill in movements manually before confirming"
-    ],
-    "passes": true
-  },
-  {
-    "category": "ui",
-    "description": "Build the category management screen",
-    "steps": [
-      "At `/categories`, render a list of all categories; each row shows a color swatch, name, icon (if set), and movement count badge",
-      "Provide an 'Add Category' inline form at the top of the list: a text input for name, a color picker (a palette of preset hex colors plus a native `<input type=color>`), and an optional emoji input; submit calls POST /api/categories",
-      "Allow editing a category's name, color, and icon in-place by clicking an edit icon on the row; save on blur or Enter key",
-      "Show a delete icon on each row; clicking it opens a small confirmation popover; if movements are linked, disable the delete icon and show a tooltip with the movement count explaining why deletion is blocked",
-      "Show an empty state illustration with a 'Create your first category' prompt when the list is empty"
-    ],
-    "passes": true
-  },
-  {
-    "category": "functional",
-    "description": "Containerize the application with Docker and Docker Compose",
-    "steps": [
-      "Write a multi-stage `api/Dockerfile`: a `builder` stage that installs all deps and compiles TypeScript to `dist/`, and a lean `runtime` stage (node:lts-slim) that installs `tesseract-ocr` and the `eng` language pack via apt, copies only `dist/` and production `node_modules`, and sets the `CMD` to `node dist/index.js`",
-      "Write a multi-stage `client/Dockerfile`: a `builder` stage that runs `vite build`, and a `runtime` stage based on `nginx:alpine` that copies the built `dist/` into `/usr/share/nginx/html` and adds an `nginx.conf` that serves the SPA with a `try_files` fallback to `index.html`",
-      "Write a `docker-compose.yml` at the repo root with three services: `postgres` (official `postgres:16-alpine` image, named volume `pgdata` for `/var/lib/postgresql/data`, healthcheck using `pg_isready`), `api` (built from `api/Dockerfile`, depends_on postgres with condition `service_healthy`, named volume `uploads` mounted at `UPLOAD_DIR`, env vars sourced from `.env`), and `client` (built from `client/Dockerfile`, depends_on api, exposes port 80)",
-      "Write a `docker-compose.override.yml` for local development: override the `api` service to mount `./api/src` into the container and run `nodemon` for hot-reload; override the `client` service to run `vite --host` with `./client/src` mounted instead of building the static image; expose the Vite dev port (5173) directly",
-      "Add `.dockerignore` files in both `api/` and `client/` excluding `node_modules`, `.env`, `dist/`, and test artefacts; document the full dev workflow in the README: `cp .env.example .env`, `docker compose up --build`, then `docker compose run api npm run migrate`"
-    ],
-    "passes": true
-  },
-  {
-    "category": "functional",
-    "description": "Cross-cutting: validation, error handling, and production configuration",
-    "steps": [
-      "Use `zod` (or `express-validator`) on every POST and PUT endpoint to validate request bodies; on failure return 400 with `{ error: 'Validation failed', details: { field: message } }`",
-      "Add a global Express error handler that catches unhandled errors, logs the stack trace via the configured logger, and returns 500 with `{ error: 'Internal server error' }` without leaking stack traces in production",
-      "In production mode (`NODE_ENV=production`), the Express container serves only the API; the `client` nginx container handles static file serving and SPA routing — ensure the nginx `location /api` block proxies to the `api` service hostname",
-      "Add a `.env.example` at the repo root documenting every variable consumed by `docker-compose.yml`: `POSTGRES_USER`, `POSTGRES_PASSWORD`, `POSTGRES_DB`, `DATABASE_URL`, `PORT` (default 3000), `UPLOAD_DIR` (default `/app/uploads`), `OPENROUTER_API_KEY` (set in shell via `~/.zshrc`, copy value from `$OPENROUTER_API_KEY`), `OPENROUTER_MODEL` (default `anthropic/claude-haiku-4-5`), `NODE_ENV`; add `.env` to `.gitignore` so the key is never committed",
-      "Add a root-level README section covering both Docker and bare-metal workflows: Docker path is `cp .env.example .env && docker compose up --build && docker compose run api npm run migrate`; bare-metal path is install deps, set env vars, `npm run migrate`, `npm run dev`"
+      "Update the extraction prompt to require two amount fields per movement: `rawAmountText` (the amount string exactly as it appears on the receipt, e.g. '40,313' or '1.234,56') and `amount` (the model's normalized plain JSON number); instruct the model to use receipt cues — language (Spanish vs. English), currency symbols/codes (COP, $, USD, EUR), and digit grouping — to disambiguate, noting that in Spanish-language receipts ',' and '.' are commonly thousands separators (COP amounts rarely carry decimals), so '40,313' on a DAVIbank notification is forty thousand, not forty point three",
+      "Create `api/src/helpers/parseAmount.ts` — exported `parseAmount(rawText, localeHint?)` deterministic normalizer: when both separators are present the last one is the decimal separator ('1.234,56' → 1234.56, '1,234.56' → 1234.56); when a single separator is followed by exactly 3 digits and the locale hint is Spanish/COP (or the value has no other decimal evidence), treat it as a thousands separator ('40,313' → 40313); when followed by 1–2 digits, treat it as a decimal ('40,31' → 40.31); strip currency symbols, codes, and whitespace before parsing",
+      "In `POST /api/import/extract`, run `parseAmount(rawAmountText, localeHint)` server-side and compare against the model's `amount`: when they agree, return the value with `amountSuspect: false`; when they disagree, prefer the deterministic `parseAmount` result and return `amountSuspect: true` plus `rawAmountText` so the UI can flag it; derive `localeHint` from the receipt language the model reports (add a top-level `language` field to the extraction response)",
+      "In the import review table, show a ⚠ warning icon beside the Amount cell when `amountSuspect` is true, with a tooltip showing the original receipt text ('Receipt shows \"40,313\" — please verify'); editing the amount manually clears the flag; suspect rows do not block confirmation",
+      "Tests for `parseAmount` covering '40,313' (COP thousands → 40313), '40.313' (Spanish thousands → 40313), '1.234,56' (→ 1234.56), '1,234.56' (→ 1234.56), '40,31' (→ 40.31), '$ 40.313 COP' (symbol stripping), and plain '40313'; extraction tests assert the suspect flag is set when model and parser disagree"
     ],
     "passes": true
   }

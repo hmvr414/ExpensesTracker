@@ -3,6 +3,7 @@ import cors from 'cors';
 import morgan from 'morgan';
 import path from 'path';
 import categoriesRouter from './routes/categories';
+import paymentMethodsRouter from './routes/payment-methods';
 import movementsRouter from './routes/movements';
 import attachmentsRouter from './routes/attachments';
 import suggestRouter from './routes/suggest';
@@ -46,6 +47,7 @@ export function createApp(): express.Application {
   app.use('/uploads', express.static(uploadDir));
 
   app.use('/api/categories', categoriesRouter);
+  app.use('/api/payment-methods', paymentMethodsRouter);
   app.use('/api/movements', movementsRouter);
   app.use('/api/attachments', attachmentsRouter);
   app.use('/api/suggest', suggestRouter);

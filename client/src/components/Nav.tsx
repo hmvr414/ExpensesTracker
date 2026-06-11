@@ -4,6 +4,7 @@ const links = [
   { to: '/', label: 'Dashboard' },
   { to: '/import', label: 'Import from Image' },
   { to: '/categories', label: 'Categories' },
+  { to: '/payment-methods', label: 'Payment Methods' },
 ] as const;
 
 export function Nav() {

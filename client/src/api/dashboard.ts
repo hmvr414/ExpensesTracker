@@ -10,6 +10,14 @@ export interface CategoryBreakdown {
   percentage: number;
 }
 
+export interface PaymentMethodBreakdown {
+  paymentMethodId: number | null;
+  name: string;
+  kind: string;
+  total: number;
+  percentage: number;
+}
+
 export interface TimeSeriesBucket {
   label: string;
   total: number;
@@ -24,6 +32,7 @@ export interface DashboardData {
   totalAmount: number;
   movementCount: number;
   categoryBreakdown: CategoryBreakdown[];
+  paymentMethodBreakdown: PaymentMethodBreakdown[];
   timeSeries: TimeSeriesBucket[];
   previousPeriod: PreviousPeriod;
   topStore: string | null;

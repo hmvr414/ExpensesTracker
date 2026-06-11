@@ -26,4 +26,9 @@ describe('AppRoutes', () => {
     renderAt('/categories');
     expect(screen.getByRole('heading', { name: /categories/i })).toBeInTheDocument();
   });
+
+  it('renders Payment Methods page at /payment-methods', () => {
+    renderAt('/payment-methods');
+    expect(screen.getByRole('heading', { name: /payment methods/i })).toBeInTheDocument();
+  });
 });

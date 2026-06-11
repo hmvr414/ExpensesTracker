@@ -106,3 +106,214 @@ without TypeScript errors; all 244 tests pass (118 API + 126 client).
 
 Remaining items in prd.json with passes: false:
 None — all PRD items are now complete.
+
+--- 2026-06-10 ---
+Feature completed: Payment method column in the OCR import review table (client/src/pages/Import.tsx)
+
+Chose this feature because it was the last missing piece of the payment-method chain — the backend
+OCR card detection (PRD item 5) was already done but invisible to users without this UI.
+
+What was implemented:
+- 'Paid with' column in the Step-3 review table: select populated from GET /api/payment-methods
+  (icon + name per option), pre-selected from the extract response's paymentMethodId, with a
+  ✦ 'AI detected' badge (data-testid="payment-ai-badge") when paymentAiSuggested is true
+- Manual select change clears the badge (mirrors the category override behavior)
+- Unregistered-card prompt: when extract returns detectedPaymentLabel with null paymentMethodId,
+  the cell shows 'Detected "X" — Register this card?'; clicking POSTs /api/payment-methods
+  (kind 'card', name/brand/variant from detected values), inserts the new method into the select
+  options (sorted by name), and selects it in that row
+- Confirm payload now includes payment_method_id per row
+- Success summary (Step 4) shows date, store, amount, and a payment method badge (icon + name,
+  data-testid="summary-payment-method"); badge omitted when the movement has no payment method
+
+Small backend change: POST /api/import/confirm RETURNING clause now also returns store and
+payment_method_id on each created row (api/src/routes/import.ts) so the summary can render them.
+Client types updated accordingly: ExtractedMovement (+6 payment fields), ConfirmMovementInput
+(+payment_method_id), ConfirmResponse.created (+store, +payment_method_id) in client/src/api/import.ts.
+
+Tests: 170 API (1 new in payment-method-wiring.test.ts) + 174 client (8 new in Import.test.tsx) = 344
+Build: api/ and client/ compile cleanly
+
+Remaining items in prd.json with passes: false:
+1. Second-pass category suggestion when no existing category matches (integration) — prerequisite for #2
+2. Editable AI-suggested new category field (ui)
+3. Clean, context-aware description extraction (integration)
+4. Locale-aware amount separator parsing during OCR extraction (integration)
+
+--- 2026-06-10 ---
+Feature completed: Second-pass category suggestion when no existing category matches (integration)
+
+Chose this because it is the prerequisite for the "Editable AI-suggested new category field" UI item.
+All backend; no client changes.
+
+What was implemented:
+- api/src/helpers/suggest.ts: when the first pass cleanly returns categoryId null (or a hallucinated
+  unknown id), a second OpenRouter call asks for a concise 1–2 word capitalized category name in the
+  user's catalog language; returns { categoryId, suggestedNewCategory }. Second pass response key is
+  "newCategoryName"; names are trimmed and rejected when empty or >40 chars. Both passes share a 3 s
+  timeout and never throw. IMPORTANT design choice: when the FIRST pass errors/times out, the second
+  pass is SKIPPED (no point stacking calls on a struggling backend, and it keeps the existing 3 s
+  worst-case-ish latency). Second pass also runs when the user has zero categories.
+- api/src/helpers/categoryResolver.ts (new): resolveCategoryByName(client, name) — case-insensitive
+  find-or-create; auto-assigns the first preset palette color not already in use (falls back to
+  palette[used % len]); handles 23505 race by re-selecting. PRESET_COLORS here mirrors the client's
+  palette in Categories.tsx — keep them in sync if you change either.
+- POST/PUT /api/movements + POST /api/import/confirm accept new_category_name (1–40 chars, trimmed),
+  rejected with 400 ({ details: { new_category_name } }) when category_id is also non-null.
+  Resolution happens inside the same transaction as the movement write. POST/PUT respond with the
+  movement row plus a `category: { id, name, color, created }` field. Confirm dedupes resolution
+  per batch (case-insensitive) and returns top-level `resolvedCategories` array; its RETURNING now
+  also includes category_id per created row.
+- POST /api/import/extract: each movement now carries suggestedNewCategory; suggestion calls are
+  deduped per extraction batch via an in-process Map keyed by (store, description) — identical rows
+  trigger one first-pass + one second-pass call total.
+
+Tests: 186 API (6 new in suggest.test.ts, 10 new in new-category.test.ts) + 174 client = 360
+Build: api/ and client/ compile cleanly
+
+Note for the next person: the UI item "Editable AI-suggested new category field" is now unblocked —
+the extract response carries suggestedNewCategory and confirm accepts new_category_name +
+returns resolvedCategories for the success summary's color swatches. Client API types in
+client/src/api/import.ts and movements.ts have NOT been extended with these fields yet; do that
+as part of the UI feature.
+
+Remaining items in prd.json with passes: false:
+1. Editable AI-suggested new category field (ui)
+2. Clean, context-aware description extraction (integration)
+3. Locale-aware amount separator parsing during OCR extraction (integration)
+
+--- 2026-06-11 ---
+Feature completed: Editable AI-suggested new category field (ui)
+
+Chose this because the second-pass backend (previous entry) was shipping dark — extract already
+returned suggestedNewCategory and confirm already accepted new_category_name, but no UI used them.
+All client-side; zero backend changes.
+
+What was implemented:
+- client/src/api/* type extensions (the ones flagged as missing in the previous entry):
+  suggest.ts SuggestCategoryResponse.suggestedNewCategory; import.ts ExtractedMovement.
+  suggestedNewCategory (REQUIRED field — test fixtures must include it), ConfirmMovementInput.
+  new_category_name, ConfirmResponse.created[].category_id + ConfirmResponse.resolvedCategories;
+  movements.ts new_category_name on Create/UpdateMovementInput and optional `category`
+  (ResolvedCategory) on Movement. ResolvedCategory ({id,name,color,created}) lives in categories.ts.
+- Import review table (client/src/pages/Import.tsx): when a row has categoryId null +
+  suggestedNewCategory, the Category cell renders a text input (data-testid="new-category-input")
+  pre-filled with the suggestion + ✦ 'AI suggested' badge (new-category-ai-badge) instead of the
+  select. ⌄ toggle (new-category-toggle) reverts to the select; clearing the text also reverts;
+  editing clears the badge (consistent with the select-override convention). The debounced per-row
+  suggest call now also switches the cell into text mode when it returns a new-name suggestion.
+- Confirm payload: rows in text mode send new_category_name and OMIT category_id (backend 400s if
+  both are present). Success summary shows a 'New categories created:' block
+  (new-categories-summary) with color swatches (new-category-swatch) from resolvedCategories
+  filtered to created: true; created categories are also merged into the page's categories state.
+- MovementForm: when the debounced suggestion returns categoryId null + suggestedNewCategory, an
+  inline 'Create category "X"?' hint (create-category-hint) appears under the Category select;
+  accepting swaps the select for a pre-filled text input (same testids/toggle/clear-to-revert as
+  the import table) and submit sends new_category_name instead of category_id (create AND edit).
+  Hint visibility is computed at render (suggestedNewCategory && categoryId == null && !text mode)
+  so there's no stale-closure guard needed in the debounce handler.
+- /categories screen + category selects refresh requirement: satisfied without new code — the
+  Categories page and MovementForm both refetch on mount/open (SPA navigation, no full reload).
+
+Tests: 186 API + 190 client (9 new in Import.test.tsx, 7 new in MovementForm.test.tsx) = 376
+Build: api/ and client/ compile cleanly (note: `npx tsc -b` in client/ fails on vite.config.ts —
+pre-existing, unrelated; the real check is `npm run build` which uses plain `tsc` and passes)
+
+Remaining items in prd.json with passes: false:
+1. Clean, context-aware description extraction (integration)
+2. Locale-aware amount separator parsing during OCR extraction (integration)
+
+--- 2026-06-11 ---
+Feature completed: Locale-aware amount separator parsing during OCR extraction (integration)
+
+Chose this over the remaining description-extraction item because a misparsed separator corrupts the
+core money field by 1000x ('40,313' read as 40.313) — a data-integrity bug — while bad descriptions
+are only a quality issue. Also fully self-contained: no migration, no web calls.
+
+What was implemented:
+- api/src/helpers/parseAmount.ts (new): parseAmount(rawText, localeHint?) deterministic normalizer.
+  Strips currency symbols/codes (everything not [0-9.,]); both separators present → last one is the
+  decimal sep; same separator repeated → thousands groups; SINGLE separator + exactly 3 trailing
+  digits → thousands ('40,313' → 40313) REGARDLESS of locale hint (with one separator there is no
+  other decimal evidence, so the PRD's "or" branch always applies — the localeHint param is accepted
+  but currently unused, kept for API compat); exception: integer part '' or '0' stays decimal
+  ('0.125'); 1–2 (or 4+) trailing digits → decimal. Returns null when no digits survive stripping.
+- api/src/routes/import.ts extract route: prompt now requires per-movement rawAmountText (verbatim
+  receipt string) + normalized amount, plus a top-level "language" field ('es'/'en') and explicit
+  Spanish/COP separator guidance. Server-side, parseAmount(rawAmountText, language) is compared to
+  the model amount with a 0.005 epsilon: agree → amountSuspect false; disagree → the DETERMINISTIC
+  value wins and amountSuspect true. Missing/unparseable rawAmountText → model amount, suspect
+  false. Response now carries top-level `language` (null when model omits it) and per-movement
+  rawAmountText + amountSuspect. Nothing persisted at extract time (unchanged); confirm is untouched
+  (the UI sends the corrected number).
+- Client (Import.tsx): ⚠ icon (data-testid="amount-suspect-warning") beside the Amount input when
+  amountSuspect, tooltip via title='Receipt shows "X" — please verify' from rawAmountText; editing
+  the amount clears the flag (onAmountChange now also sets amountSuspect false); suspect rows do NOT
+  block the Import button. Types: ExtractedMovement.rawAmountText?/amountSuspect? and
+  ExtractResponse.language? added as OPTIONAL fields (deliberate deviation from the
+  suggestedNewCategory required-field convention, so existing fixtures and manually-added rows don't
+  need the fields).
+
+Tests: 209 API (14 new in parseAmount.test.ts, 9 new in import-amount-parsing.test.ts) +
+195 client (5 new in Import.test.tsx) = 404
+Build: api/ and client/ compile cleanly (client `npm run build` passes; `npx tsc -b` still has the
+pre-existing unrelated vite.config.ts complaint noted in the previous entry)
+
+Remaining items in prd.json with passes: false:
+1. Clean, context-aware description extraction (integration) — last one. Note for whoever takes it:
+   its prompt-rule step overlaps the extract prompt this feature just touched (description rules go
+   in the same prompt in api/src/routes/import.ts), and its store_context summary also feeds
+   suggestCategory in api/src/helpers/suggest.ts.
+
+--- 2026-06-11 ---
+Feature completed: Clean, context-aware description extraction (integration)
+
+The last prd.json item with passes: false. All backend; zero client changes (descriptions simply
+arrive cleaner through the existing extract/suggest responses).
+
+What was implemented:
+- api/migrations/007_create-store-context.js: table store_context (store text PK normalized
+  lowercase, summary text, fetched_at timestamptz). summary '' (empty string) is meaningful: it
+  marks "searched, found nothing / failed" so a store is web-searched AT MOST ONCE, EVER.
+- api/src/helpers/descriptionSanitizer.ts (new): sanitizeDescription(description, store) — counts
+  forbidden payment-vocab tokens (visa/mastercard/amex/tarjeta/efectivo/débito/crédito/compra/
+  pago/notificación/... accent- and case-insensitive) vs meaningful tokens (stopwords and pure
+  numbers ignored); when forbidden tokens are the STRICT majority the description is replaced with
+  cleanStoreName(store) (title-cased, corporate suffixes inc/llc/ltd/... dropped:
+  'OPENROUTER, INC' → 'Openrouter') or null when no store. Ties are kept ('Gold ring' survives).
+- api/src/helpers/storeContext.ts (new): getStoreContext(store) — cached summary from
+  store_context, else null for stores with prior movements (their own history is the context),
+  else ONE web-enabled OpenRouter call (model slug + ':online' suffix, 5 s cap, never throws,
+  'unknown' reply treated as no summary) cached even on failure; concurrent lookups for the same
+  store share one in-flight call. Also exports getRecentStoreDescriptions(store): up to 10 most
+  recent DISTINCT non-empty descriptions (GROUP BY description ORDER BY MAX(created_at) DESC),
+  case-insensitive store match, never throws.
+- api/src/helpers/suggest.ts: suggestCategory now awaits getRecentStoreDescriptions +
+  getStoreContext and injects both ('Store context (what this merchant sells): ...' +
+  'Descriptions this user previously wrote for this store ...') into BOTH passes (category match
+  and new-name proposal). NOTE: this means a suggest call for a brand-new store can take up to
+  ~5 s extra the first time (web search) — by design, once per store ever.
+- api/src/routes/import.ts extract prompt: explicit 'Description rules:' block (what was purchased
+  or what the merchant sells, NEVER the payment instrument; forbidden vocab list; bank-notification
+  emails describe the merchant's product, not the notification). buildOcrStoreContextLines() adds
+  the user's prior descriptions + cached store_context summaries for known stores (length >= 3)
+  whose names appear verbatim (case-insensitive) in the OCR text — capped at 3 stores. Post-model,
+  sanitizeDescription runs server-side and the SANITIZED description is what gets passed to
+  suggestCategory and returned to the client.
+- IMPORTANT for existing tests: suggest.test.ts now pre-seeds empty store_context rows for its
+  store names in beforeAll (and deletes them in afterAll) so the web-enrichment pass never fires
+  there and its OpenAI call-count/timeout assertions stay deterministic. Any future test that runs
+  the REAL suggestCategory against a store with no movements must do the same (or mock
+  ../helpers/storeContext) or it will see an extra ':online' mock call.
+
+Tests: 248 API (15 sanitizeDescription, 12 store-context, 4 suggest-context, 8
+import-description-context — all new) + 195 client = 443. Builds: api/ and client/ compile cleanly.
+
+Environment note: no Docker daemon was reachable in this session; the test DB
+(postgres:16-alpine, port 5433, db expenses_test) was started with podman instead:
+  podman run -d --name expenses-test-db -e POSTGRES_USER=postgres -e POSTGRES_PASSWORD=password \
+    -e POSTGRES_DB=expenses_test -p 5433:5432 docker.io/library/postgres:16-alpine
+The container was left running for the next session.
+
+Remaining items in prd.json with passes: false:
+None — all 10 PRD items are now complete.

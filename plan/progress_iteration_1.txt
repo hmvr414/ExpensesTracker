@@ -1,0 +1,398 @@
+## 2026-06-09 — Bootstrap the Node.js/Express API server [DONE]
+
+Implemented the first PRD feature using TDD. All 4 tests pass, TypeScript build is clean.
+
+### What was done
+- Scaffolded `api/` with Express + TypeScript (tsconfig.json, nodemon.json, jest.config.js)
+- Dependencies: express, cors, morgan, dotenv (runtime); ts-jest, supertest, nodemon, ts-node (dev)
+- `src/app.ts` exports a `createApp()` factory (separates app from server for testability)
+- `src/index.ts` loads dotenv and starts the server with a startup log line
+- `GET /health` returns `{ status: 'ok', timestamp: ISO-string, version: string }`
+- CORS allows `http://localhost:5173` in dev; uses `CORS_ORIGIN` env var in production
+- morgan logging enabled (suppressed in test env)
+- `.env.example` documents: PORT, DATABASE_URL, UPLOAD_DIR, OPENROUTER_API_KEY, OPENROUTER_MODEL, NODE_ENV, CORS_ORIGIN
+
+### What's next (suggested)
+Next highest priority: **Set up PostgreSQL database schema and migrations** — this is the second feature and blocks all data-layer features (categories, movements, attachments). Uses `pg` + `node-pg-migrate` with `npm run migrate`. The app already reads `DATABASE_URL` from env.
+
+---
+
+## 2026-06-09 — Set up PostgreSQL database schema and migrations [DONE]
+
+Implemented using TDD against a live Docker PostgreSQL instance (postgres:16-alpine). All 10 migration tests pass, TypeScript build is clean, total suite is 14/14 green.
+
+### What was done
+- Installed `pg` + `node-pg-migrate` (runtime), `@types/pg` (dev)
+- Created `api/src/db.ts` — singleton `Pool` factory using `DATABASE_URL`
+- Created 4 migration files in `api/migrations/`:
+  - `001_create-categories.js` — id, name (unique not null), color, icon, created_at
+  - `002_create-movements.js` — id, amount (numeric 12,2), date, description, store, category_id (FK → categories ON DELETE SET NULL), created_at, updated_at
+  - `003_create-attachments.js` — id, movement_id (FK → movements ON DELETE SET NULL, nullable), file_name, file_path, mime_type, created_at
+  - `004_seed-categories.js` — inserts Food, Transport, Entertainment, Health, Utilities, Shopping, Other each with a distinct hex color (ON CONFLICT DO NOTHING)
+- Added `npm run migrate` and `npm run migrate:down` scripts to `api/package.json`
+- Tests in `src/__tests__/migrations.test.ts` verify table columns, data types, FK constraints, uniqueness, and seed data
+
+### Testing notes
+- Tests require a running PostgreSQL instance; use `TEST_DATABASE_URL` env var (default: postgresql://postgres:password@localhost:5433/expenses_test)
+- Spin up with: `docker run --rm -d --name test-pg -e POSTGRES_PASSWORD=password -e POSTGRES_DB=expenses_test -p 5433:5432 postgres:16-alpine`
+- Then: `TEST_DATABASE_URL=postgresql://postgres:password@localhost:5433/expenses_test npm test`
+- The `node-pg-migrate` CLI emits "Can't determine timestamp" warnings for numeric-prefixed files — these are harmless; migrations still run in correct order
+
+### What's next (suggested)
+Next highest priority: **Implement the categories REST API** — `GET/POST/PUT/DELETE /api/categories`. The db pool (`src/db.ts`) and categories table are now ready. Needs `zod` for request validation per the cross-cutting requirements.
+
+---
+
+## 2026-06-09 — Implement the categories REST API [DONE]
+
+Implemented using TDD. All 15 category tests pass; full suite is 29/29 green. TypeScript build is clean.
+
+### What was done
+- Installed `zod` (^4.4.3) for request body validation
+- Refactored `api/src/db.ts`: Pool is now **lazily initialized** on first `db.query()` call (via `getPool()`), so tests can set `DATABASE_URL` before any query runs. Exported `resetPool()` for test teardown between suites.
+- Created `api/src/routes/categories.ts` — Router with all 4 endpoints:
+  - `GET /api/categories` — all categories ordered by name with `movement_count` via LEFT JOIN
+  - `POST /api/categories` — zod-validated; 400 on missing name or bad hex color, 409 on duplicate name
+  - `PUT /api/categories/:id` — partial updates; 404 if not found, 409 on name collision (excluding self), 400 on bad color
+  - `DELETE /api/categories/:id` — 409 if any movement references the category, 404 if not found, 204 on success
+- Mounted router at `/api/categories` in `app.ts`
+- Added global Express error handler in `app.ts` (logs stack in non-production, returns 500 + `{ error: 'Internal server error' }`)
+- Tests in `src/__tests__/categories.test.ts`: 15 tests covering happy paths, validation errors, uniqueness, FK-blocked delete
+
+### Key design notes
+- Error shape is consistent: `{ error: string, details?: Record<string, string> }` for 400s, `{ error: string }` for 404/409
+- `db.ts` `resetPool()` must be called in test `beforeAll` when setting `DATABASE_URL` dynamically to force a new Pool to be created
+
+### What's next (suggested)
+Next highest priority: **Implement the expense movements REST API** — `GET/POST/PUT/DELETE /api/movements` with filtering, pagination, and attachment linkage. The `movements` table and `db.ts` lazy pool are ready. Will also need `zod` validation (already installed).
+
+---
+
+## 2026-06-09 — Implement the expense movements REST API [DONE]
+
+Implemented using TDD against a live Docker PostgreSQL instance. All 24 movement tests pass; full suite is 53/53 green. TypeScript build is clean.
+
+### What was done
+- Created `api/src/routes/movements.ts` — Router with all 5 endpoints:
+  - `GET /api/movements` — paginated list with filters (from/to date range, category_id, store, search), each movement includes category name/color and an `attachments` array
+  - `GET /api/movements/:id` — single movement joined with category and attachments, 404 if not found
+  - `POST /api/movements` — zod-validated; amount required (positive), date optional (ISO YYYY-MM-DD, defaults to today); validates category_id exists if provided
+  - `PUT /api/movements/:id` — partial updates with dynamic SET clause (supports setting category_id to null explicitly), 404 if not found
+  - `DELETE /api/movements/:id` — deletes movement, its attachment DB records, and attempts to unlink attachment files from disk; 404 if not found, 204 on success
+- Mounted router at `/api/movements` in `app.ts`
+- Zod validation returns `{ error: 'Validation failed', details: { field: message } }` shape consistently with categories API
+
+### Key design notes
+- Dynamic SET clause in PUT prevents COALESCE from masking explicit null writes to category_id
+- `params.push(value)` returns new array length — used as parameter index ($1, $2...) for clean filter chaining in GET list
+- File deletion on DELETE is best-effort (silently ignores ENOENT); DB records are always cleaned up
+
+### Testing notes
+- Tests require a running PostgreSQL instance; use `TEST_DATABASE_URL` env var (default: postgresql://postgres:password@localhost:5433/expenses_test)
+- Spin up with: `docker run --rm -d --name test-pg -e POSTGRES_PASSWORD=password -e POSTGRES_DB=expenses_test -p 5433:5432 postgres:16-alpine`
+- Then: `TEST_DATABASE_URL=postgresql://postgres:password@localhost:5433/expenses_test npm test`
+
+### What's next (suggested)
+Next highest priority: **Handle file attachment uploads and serving** — `POST /api/attachments`, `DELETE /api/attachments/:id`, static `/uploads` route, and multer configuration. The `attachments` table is already ready and movements DELETE already handles file cleanup. Needs `multer` installed.
+
+---
+
+## 2026-06-09 — Handle file attachment uploads and serving [DONE]
+
+Implemented using TDD. All 11 attachment tests pass; full suite is 64/64 green. TypeScript build is clean.
+
+### What was done
+- Installed `multer` (^1.x) and `@types/multer` (dev)
+- Created `api/src/routes/attachments.ts` — Router with 2 endpoints:
+  - `POST /api/attachments` — multipart upload via multer; stores file under `UPLOAD_DIR/<YYYY-MM>/`; restricted to `image/jpeg`, `image/png`, `image/webp`, `application/pdf`; 10 MB cap; persists a row in `attachments`; returns record + `url` field; cleans up orphan file if DB insert fails
+  - `DELETE /api/attachments/:id` — deletes DB row and file from disk (ignores ENOENT); 404 if not found, 204 on success
+- Updated `app.ts`:
+  - Mounted `express.static(UPLOAD_DIR)` at `/uploads` so files are accessible at `GET /uploads/<YYYY-MM>/<filename>`
+  - Mounted `attachmentsRouter` at `/api/attachments`
+- Tests in `src/__tests__/attachments.test.ts`: 11 tests covering upload (JPEG/PNG/WEBP/PDF), unsupported type rejection, missing file, YYYY-MM subdirectory, delete (with and without existing file on disk), and static serving
+
+### Key design notes
+- `multer.diskStorage` reads `UPLOAD_DIR` lazily at request time (not at module load) so tests can set `process.env.UPLOAD_DIR` before calls
+- File filter uses `ALLOWED_TYPES` Set; multer `fileFilter` callback receives the Error, which is re-surfaced as 400
+- DB insert failure triggers `fsp.unlink` to prevent orphan files; the original error is re-thrown for the global handler
+
+### Testing notes
+- Tests create a `tmp` directory via `fs.mkdtempSync` so no manual cleanup is needed
+- Same Docker test DB setup as previous suites; `beforeAll` calls `resetPool()` after setting `process.env.DATABASE_URL`
+
+### What's next (suggested)
+Next highest priority: **Suggest a matching category for a movement using AI** — `POST /api/suggest/category`. Uses the OpenRouter API (`openai` npm package with custom baseURL). Needs `OPENROUTER_API_KEY` and `OPENROUTER_MODEL` (default `anthropic/claude-haiku-4-5`). No DB migrations needed — reads from existing `categories` table. Extract a shared `suggestCategory(store, description)` helper for reuse in the OCR pipeline.
+
+---
+
+## 2026-06-09 — Suggest a matching category for a movement using AI [DONE]
+
+Implemented using TDD. All 9 suggest tests pass; full suite is 73/73 green. TypeScript build is clean.
+
+### What was done
+- Installed `openai` (^4.x) npm package for OpenRouter API integration
+- Created `api/src/helpers/suggest.ts` — exported `suggestCategory(store?, description?)` helper:
+  - Fetches all categories from DB (ordered by name)
+  - Calls OpenRouter chat completions endpoint via `openai` package with custom `baseURL = 'https://openrouter.ai/api/v1'`
+  - Uses `OPENROUTER_MODEL` env var (default: `anthropic/claude-haiku-4-5`), `temperature: 0`, `response_format: { type: 'json_object' }`
+  - Hard 3-second timeout via `Promise.race`; on timeout, unparseable JSON, unknown categoryId, or any error returns `{ categoryId: null }` — never throws
+  - Returns `{ categoryId, categoryName, color }` from the matched DB row, or `{ categoryId: null }` when no confident match
+- Created `api/src/routes/suggest.ts` — `POST /category` handler with zod validation (at least one of `store`/`description` required; 400 if both absent)
+- Mounted `suggestRouter` at `/api/suggest` in `app.ts`
+
+### Key design notes
+- The `suggestCategory` helper is extracted into `src/helpers/suggest.ts` so the OCR extraction pipeline can call it directly without an HTTP hop
+- Tests mock the `openai` module with `jest.mock('openai')` — a real DB connection is still used (to verify category lookups work end-to-end)
+- The timeout test (mock returns after 10 seconds) reliably completes in ~3 seconds due to `Promise.race`; the open-handle warning in Jest output is the pending mock promise and is harmless
+
+### Testing notes
+- Same Docker test DB setup as previous suites: `TEST_DATABASE_URL=postgresql://postgres:password@localhost:5433/expenses_test npm test`
+- `openai` module mock must be at top level (`jest.mock('openai')`) before any imports that use it
+
+### What's next (suggested)
+Next highest priority: **Extract expense data from images using OCR and AI** — `POST /api/import/extract`. Uses `tesseract` CLI (child_process.execFile), same OpenRouter client, and calls the shared `suggestCategory` helper for each extracted movement in parallel. Returns `{ attachmentId, rawText, movements: [...] }`.
+
+---
+
+## 2026-06-09 — Extract expense data from images using OCR and AI [DONE]
+
+Implemented using TDD. All 11 import tests pass; full suite is 84/84 green. TypeScript build is clean.
+
+### What was done
+- Created `api/src/helpers/ocr.ts` — exported `runTesseract(filePath)` helper:
+  - Wraps `child_process.execFile('tesseract', [...])` via `promisify`
+  - On ENOENT, re-throws with a `code: 'TESSERACT_NOT_FOUND'` sentinel so the route can return a clear 500
+  - Other tesseract errors propagate up and are caught by the route (falls through with empty rawText)
+- Created `api/src/routes/import.ts` — `POST /extract` handler:
+  - Accepts single image/PDF upload (multer, same config as attachments: allowed types + 10 MB cap)
+  - Persists an `attachments` row with `movement_id = null` immediately after file save; returns 500 if DB insert fails (orphan file cleaned up)
+  - Runs `runTesseract` to get raw OCR text; returns 500 on `TESSERACT_NOT_FOUND`; falls through with empty rawText on other OCR errors
+  - Calls OpenRouter chat completions (via `openai` package with custom baseURL) with a structured prompt requesting `{ movements: [...] }`; 10-second timeout via `Promise.race`
+  - Calls the shared `suggestCategory` helper for each extracted movement in parallel (Promise.all); attaches `{ categoryId, categoryName, color, aiSuggested: true/false }` to each movement
+  - Returns `{ attachmentId, rawText, movements }` on success; returns `{ ..., error: 'AI extraction failed' }` when AI call throws, times out, or returns unparseable JSON — never throws to the client
+- Mounted `importRouter` at `/api/import` in `app.ts`
+
+### Key design notes
+- `runTesseract` is isolated in a helper so tests can `jest.mock('../helpers/ocr')` without touching `child_process`
+- `suggestCategory` is also mocked in import tests (`jest.mock('../helpers/suggest')`) — each test controls the suggestion result independently
+- `jest.clearAllMocks()` is called in `beforeEach` to reset call counts across the 11 tests
+- Movement rows are never persisted at this stage; the caller (UI) reviews extracted movements before posting to `POST /api/import/confirm`
+
+### Testing notes
+- Tests create a temp UPLOAD_DIR via `fs.mkdtempSync` (cleaned up in afterAll)
+- Same Docker test DB setup: `TEST_DATABASE_URL=postgresql://postgres:password@localhost:5433/expenses_test npm test`
+- Tesseract and OpenAI are both fully mocked — no external dependencies needed to run this suite
+
+### What's next (suggested)
+Next highest priority: **Import preview confirmation: bulk-create reviewed movements** — `POST /api/import/confirm`. Accepts `{ attachmentId, movements: [...] }`, validates every movement, inserts all in a single DB transaction, links the attachment row to each created movement, and returns `{ created: [...], count: N }`. The `attachments` and `movements` tables are ready.
+
+---
+
+## 2026-06-09 — Import preview confirmation: bulk-create reviewed movements [DONE]
+
+Implemented using TDD. All 11 confirm tests pass; full suite is 95/95 green. TypeScript build is clean.
+
+### What was done
+- Added `POST /api/import/confirm` to the existing `api/src/routes/import.ts` router
+- Imported `getPool` from `db.ts` for direct transaction management (client.query BEGIN/COMMIT/ROLLBACK)
+- Added `z` (zod) import; defined `movementItemSchema` and `confirmBodySchema` Zod schemas:
+  - `amount`: positive number (required)
+  - `date`: ISO YYYY-MM-DD string (required)
+  - `description`, `store`: optional strings
+  - `category_id`: optional nullable positive integer
+  - `attachmentId`: optional positive integer
+- Two-phase validation: Zod schema first, then per-item DB check for `category_id` existence; returns 400 with `{ error: 'Validation failed', details }` if any item fails either phase — nothing is persisted
+- Transaction wraps all `INSERT INTO movements` statements; on success, links the attachment to the first created movement via `UPDATE attachments SET movement_id = $1 WHERE id = $2` (skipped if `attachmentId` absent or not found)
+- Returns `{ created: [{ id, amount, date, description }], count: N }` with HTTP 201
+- Tests in `src/__tests__/import.test.ts` (new `describe` block): 11 tests covering missing/invalid body, per-item Zod errors, category_id DB check, no-persist-on-failure, happy path, attachment linking, missing attachment, not-found attachment
+
+### Key design notes
+- Validation is fully collected before any DB writes: Zod errors are returned immediately; category_id DB checks are gathered in a loop and all errors returned together
+- Attachment is linked to the first created movement (schema has one `movement_id` per attachment row)
+- `getPool()` is used instead of the `db` wrapper to get a raw client for explicit transaction control
+
+### Testing notes
+- Same Docker test DB: `TEST_DATABASE_URL=postgresql://postgres:password@localhost:5433/expenses_test npm test`
+- Tests insert a seed attachment (`__conf_test.jpg`) in `beforeAll` and clean up via `DELETE FROM movements WHERE description LIKE '__conf_%'` in `afterAll`
+
+### What's next (suggested)
+Next highest priority: **Provide aggregate data API for dashboard charts** — `GET /api/dashboard`. Accepts `period` (day|week|month|year|all) and optional `anchor`. Returns `{ totalAmount, movementCount, categoryBreakdown, timeSeries, previousPeriod, topStore }`. Uses `DATE_TRUNC` and `GROUP BY` to compute all aggregates in a single SQL query.
+
+---
+
+## 2026-06-09 — Provide aggregate data API for dashboard charts [DONE]
+
+Implemented using TDD. All 16 dashboard tests pass; full suite is 111/111 green. TypeScript build is clean.
+
+### What was done
+- Created `api/src/routes/dashboard.ts` — `GET /` handler:
+  - Validates `period` (day|week|month|year|all) and `anchor` (ISO date, defaults to today)
+  - Computes date ranges via `computeRange()` — returns `from`, `to`, `prevFrom`, `prevTo`, and time-series parameters for each period type
+  - **Query 1**: CTE-based SQL returning `totalAmount`, `movementCount`, `topStore`, and `categoryBreakdown` (with percentages) in a single round-trip
+  - **Query 2**: `generate_series` + `DATE_TRUNC` + `LEFT JOIN` to produce time-series with empty buckets — labels are formatted in SQL via `TO_CHAR` to avoid JavaScript timezone issues; `all` period determines range from MIN/MAX of movements
+  - **Query 3**: previous period totals for trend delta display
+  - Returns `{ totalAmount, movementCount, categoryBreakdown, timeSeries, previousPeriod, topStore }`
+- Mounted `dashboardRouter` at `/api/dashboard` in `app.ts`
+- Tests in `src/__tests__/dashboard.test.ts`: 16 tests covering validation, response shape, totals, category breakdown, timeSeries bucket counts (day=24h, week=7d, month=30d, year=12m, all=N months), empty bucket behavior, previousPeriod, topStore
+
+### Key design notes
+- `TO_CHAR` for label formatting (not JS `Date` methods) avoids timezone bugs when `node-pg` parses `timestamp without timezone` columns using the local system timezone
+- For `day` period, `seriesFrom`/`seriesTo` are `'YYYY-MM-DD 00:00:00'`/`'YYYY-MM-DD 23:00:00'` so `generate_series` produces 24 hourly buckets while the movements date filter still uses the plain date string
+- `all` period returns `previousPeriod: { totalAmount: 0, movementCount: 0 }` (no meaningful prior range)
+- Tests use far-future anchor dates (2099-xx-xx) for "empty period" assertions to avoid cross-suite DB pollution
+
+### Testing notes
+- Same Docker test DB: `TEST_DATABASE_URL=postgresql://postgres:password@localhost:5433/expenses_test npm test`
+
+### What's next (suggested)
+All backend API endpoints are now complete. Next highest priority: **Bootstrap the React frontend application** — scaffold `client/` with Vite + React + TypeScript, Tailwind CSS, React Router v6, axios API utilities, and a root-level `package.json` with `dev`/`build`/`start`/`migrate` scripts.
+
+---
+
+## 2026-06-09 — Bootstrap the React frontend application [DONE]
+
+Implemented using TDD. All 22 client tests pass; API suite remains 111/111 green. TypeScript builds are clean for both api/ and client/.
+
+### What was done
+- Scaffolded `client/` with Vite + React + TypeScript:
+  - `client/vite.config.ts` — proxy `/api` and `/uploads` to Express port (default 3000), Vitest config with jsdom environment
+  - `client/tsconfig.json` + `client/tsconfig.node.json` — strict mode, React JSX, bundler module resolution
+  - `client/index.html` — SPA entry point
+- Added Tailwind CSS v3 with custom color palette in `client/tailwind.config.ts`:
+  - Tokens: `primary` (indigo-based), `success`, `warning`, `danger`, `neutral`
+  - Dark-mode via `class` strategy
+  - `postcss.config.js` with tailwindcss + autoprefixer
+- Set up React Router v6 in `client/src/App.tsx`:
+  - Routes: `/` → Dashboard, `/import` → Import, `/categories` → Categories
+  - Exported `AppRoutes` (testable with MemoryRouter) and `App` (wraps AppRoutes in BrowserRouter + Nav)
+  - `client/src/components/Nav.tsx` — persistent sidebar with `NavLink` active-state styling
+  - Page stubs in `client/src/pages/` (Dashboard, Import, Categories) with `<h1>` headings for test assertions
+- API client utilities in `client/src/api/`:
+  - `client.ts` — `apiClient` with duck-typed Axios error handling; `ApiError` class exposes `message`, `status`, `details`
+  - `categories.ts` — `getCategories`, `createCategory`, `updateCategory`, `deleteCategory`
+  - `movements.ts` — `getMovements`, `getMovement`, `createMovement`, `updateMovement`, `deleteMovement`
+  - `dashboard.ts` — `getDashboard({ period, anchor? })`
+  - `import.ts` — `extractFromImage(FormData)`, `confirmImport({ attachmentId?, movements })`
+- ESLint + Prettier configured in `client/.eslintrc.cjs` and `client/.prettierrc`
+- Root-level `package.json` with combined scripts:
+  - `dev` — runs API (nodemon) + Vite concurrently via `concurrently`
+  - `build` — runs `api tsc` then `client vite build`
+  - `start` — `NODE_ENV=production node api/dist/index.js` (Express also serves `client/dist/` via `express.static`)
+  - `migrate` — delegates to `npm run migrate --prefix api`
+  - `test` — runs both API (Jest) and client (Vitest) test suites sequentially
+- Updated `api/src/app.ts`: in production mode, Express serves `client/dist/` as static files with SPA fallback (`*` → `index.html`)
+
+### Test breakdown (client)
+- `src/__tests__/api.test.ts` (14 tests): apiClient error-handling, categories/movements/dashboard/import API modules — all methods verified with axios mocks
+- `src/__tests__/Nav.test.tsx` (5 tests): renders app name, renders 3 NavLinks with correct `href` attributes
+- `src/__tests__/App.test.tsx` (3 tests): route smoke tests — each route renders the expected `<h1>` heading
+
+### Key design notes
+- `apiClient` uses duck-typing (`isAxiosLike`) instead of `isAxiosError` to avoid issues when `axios` is fully mocked in Vitest
+- `Nav` uses `NavLink` with `end` flag on `/` to prevent dashboard from staying active on `/import` and `/categories`
+- API modules (`categories.ts`, `movements.ts`, etc.) use bare `axios` directly (no apiClient wrapper) for testability with simple `vi.fn()` mocks on axios methods
+
+### Testing notes
+- Client tests require no external DB or services — all HTTP calls are mocked with `vi.mock('axios')`
+- Run with: `cd client && npm test`
+
+### What's next (suggested)
+Next highest priority: **Build the dashboard page with expense summary and charts** — implement the full Dashboard UI: stat cards (Total Spend, Movement Count, Top Category with trend indicators), donut chart (by category, using Recharts), bar chart (time series from dashboard API), Recent Movements list. The `getDashboard` API utility and all backend endpoints are ready.
+
+---
+
+## 2026-06-09 — Build the dashboard page with expense summary and charts [DONE]
+
+Implemented using TDD. All 13 dashboard UI tests pass; full client suite is 35/35 green. TypeScript build clean.
+
+### What was done
+- Installed `recharts` (^3.8.1) in `client/`
+- Rewrote `client/src/pages/Dashboard.tsx` from stub to full implementation:
+  - **Skeleton loaders**: 4 card skeletons + 2 chart skeletons + list skeleton while `Promise.all([getDashboard, getMovements])` resolves
+  - **4 stat cards**: Total Spend (currency-formatted), Movements count, Top Category (first entry from categoryBreakdown), Top Store — each with `▲`/`▼` trend indicators vs. previous period
+  - **Donut chart**: `PieChart` + `Pie` with inner radius for donut shape; color swatches from `categoryBreakdown[].color`; legend beside chart with name and percentage; "No data" illustration when breakdown is empty
+  - **Bar chart**: `BarChart` + `Bar` over `timeSeries` buckets with x-axis labels from API, `CartesianGrid`, and `Tooltip` formatting amounts as currency
+  - **Recent Movements list**: date (formatted MM/DD), store/description, category badge (colored pill), amount — no navigation implemented (edit form is a future feature)
+  - **Full-page empty state**: triggered when `movementCount === 0 && movements.length === 0`; shows icon, heading "No expenses yet", and "Add your first expense" CTA button
+- Tests in `src/__tests__/Dashboard.test.tsx`: 13 tests — Recharts is fully mocked with `vi.mock('recharts')` returning `data-testid` containers; `getDashboard` and `getMovements` are mocked with `vi.mock`
+
+### Key design notes
+- `getAllByText` used in tests where text appears in both legend and movement badge (e.g. "Food", "Walmart")
+- Recharts `Tooltip` formatter uses `Number(v)` cast to avoid TypeScript `ValueType | undefined` error
+- `cancelled` flag in `useEffect` prevents state updates on unmounted component
+
+### Testing notes
+- All mocked — no external dependencies needed
+- Run with: `cd client && npm test`
+
+### What's next (suggested)
+Next highest priority: **Add a time period selector to the dashboard** — segmented control (Day|Week|Month|Year|All), prev/next navigation arrows, URL query param sync (`period` + `anchor`), debounced navigation, and inline spinner. Builds directly on top of the completed dashboard page.
+
+---
+
+## 2026-06-09 — Add a time period selector to the dashboard [DONE]
+
+Implemented using TDD. All 32 new PeriodSelector tests pass; full client suite is 67/67 green. TypeScript build clean.
+
+### What was done
+- Created `client/src/components/PeriodSelector.tsx` — self-contained component + exported pure helper functions:
+  - `getPeriodLabel(period, anchor)` — returns human-readable label: "June 2026", "Week of Jun 8–14", "Tuesday Jun 9", "2026", "All Time"
+  - `navigatePeriod(period, anchor, direction)` — advances/retreats anchor by the correct unit (day±1, week±7, month±1, year±1); returns ISO date string
+  - `isNextDisabled(period, anchor)` — returns true when advancing would go past today; always true for 'all' period
+  - `PeriodSelector` component: segmented control (Day|Week|Month|Year|All), prev/next arrows (hidden for 'all'), human-readable label in center, debounced nav (150 ms via `useRef` timeout), spinner when `loading=true`, disabled next button when at current period boundary
+- Updated `client/src/pages/Dashboard.tsx`:
+  - Replaced hardcoded `period: 'month'` with `useSearchParams()` reading `period` and `anchor` from URL (defaults: 'month', today)
+  - Added `fetching` state + `isFirstLoad` ref: initial load shows full skeletons; subsequent period changes show inline spinner in PeriodSelector without clearing chart data
+  - Mounted `<PeriodSelector>` beside the dashboard title; `handlePeriodChange` calls `setSearchParams` to update URL (making it bookmarkable)
+  - `useEffect` now depends on `[period, anchor]` — refetches whenever either changes
+
+### Key design notes
+- Debounce lives in `PeriodSelector` (`useRef` timeout), not in `Dashboard` — keeps URL update and API call decoupled from rapid user clicks
+- Week navigation uses Monday-anchored weeks: `startOffset = dow === 0 ? -6 : 1 - dow`
+- Cross-month week labels handled: "Week of May 30–Jun 5" vs same-month "Week of Jun 8–14"
+- `isNextDisabled` for 'week' period checks if the *next* anchor date would exceed today (not just the current anchor)
+- Exported pure helper functions (`getPeriodLabel`, `navigatePeriod`, `isNextDisabled`) allow isolated unit testing without DOM/React
+
+### Testing notes
+- Tests in `src/__tests__/PeriodSelector.test.tsx`: 32 tests covering label formatting, navigation arithmetic, boundary logic, component rendering, tab clicks, debouncing, disabled state, and spinner
+- Debounce tests use `vi.useFakeTimers()` + `act(() => vi.runAllTimers())`
+- All mocked — no external dependencies needed
+- Run with: `cd client && npm test`
+
+### What's next (suggested)
+Next highest priority: **Build the expense movement registration form** — slide-over panel from '+ Add Expense' button, form fields (amount, date, description, store, category select, attachments), debounced AI category suggestion, per-file upload progress, inline validation, success/error toasts, and edit mode with existing attachment thumbnails.
+
+---
+
+## 2026-06-09 — Build the expense movement registration form [DONE]
+
+Implemented using TDD. All 22 MovementForm tests pass; full client suite is 89/89 green. TypeScript builds clean for both api/ and client/.
+
+### What was done
+- Created `client/src/api/suggest.ts` — `suggestCategory({ store?, description? })` → `POST /api/suggest/category`
+- Created `client/src/api/attachments.ts` — `createAttachment(file, movementId?)` + `deleteAttachment(id)` API utilities
+- Created `client/src/components/MovementForm.tsx` — slide-over panel with:
+  - Fixed-position right-side overlay; clicking overlay or ✕ button calls `onClose`
+  - Form fields: Amount (`type="number"`, required, positive), Date (`type="date"`, defaults to today, required), Store (text), Description (text), Category (`<select>` populated from `GET /api/categories`), Attachments (`type="file"`, multiple, accept JPEG/PNG/WEBP/PDF)
+  - AI category suggestion: `scheduleSuggest(store, description)` debounces `suggestCategory` call by 400ms; shows ⟳ spinner during flight; on match, pre-selects category and shows ✦ "AI suggested" badge; user override clears badge
+  - Submit: validates amount (required, positive) and date (required, YYYY-MM-DD); calls `createMovement` or `updateMovement`; uploads each selected file via `createAttachment`; shows success toast → 1200ms → calls `onSaved()` + `onClose()`; on error shows error toast
+  - Edit mode: pre-populates all fields from `movement` prop; shows existing attachments with remove button (calls `deleteAttachment`)
+- Updated `client/src/pages/Dashboard.tsx`:
+  - Added `+ Add Expense` button in dashboard header
+  - Empty state "Add your first expense" button now opens form
+  - Clicking a movement row opens edit form
+  - `onSaved` handler increments `refreshKey` to trigger a data re-fetch
+  - `<MovementForm>` mounted at end (renders `null` when `open=false`)
+
+### Key design notes
+- `suggestTimerRef` and `closeTimerRef` use `useRef` to avoid capturing stale closures and to allow cleanup on unmount
+- Debounce and close timer tests use `vi.useFakeTimers()` / `vi.useRealTimers()` per-test (not globally) to avoid interference with `waitFor` which uses `setTimeout` internally
+- `await act(async () => { vi.advanceTimersByTime(ms); await Promise.resolve(); })` pattern flushes both timer callbacks and pending microtasks (async state updates) in a single step
+
+### Testing notes
+- All 22 MovementForm tests are fully mocked — no external DB or services needed
+- Run with: `cd client && npm test`
+- Fake-timer tests scope `vi.useFakeTimers()` locally within the individual test (not in `beforeEach`) to keep `waitFor` working in all other tests
+
+### What's next (suggested)
+Next highest priority: **Build the OCR-assisted image import flow** — 4-step UI at `/import`: Upload drop zone, Processing indicator (multi-stage), Review editable table with AI-suggested categories and debounced re-suggestion, Confirm button posting to `POST /api/import/confirm`. The `extractFromImage` and `confirmImport` API utilities are already in `client/src/api/import.ts`.

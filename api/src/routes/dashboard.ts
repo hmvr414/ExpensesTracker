@@ -138,12 +138,17 @@ router.get('/', async (req: Request, res: Response) => {
     category_breakdown: Array<{
       categoryId: number; name: string; color: string; total: string;
     }> | null;
+    payment_method_breakdown: Array<{
+      paymentMethodId: number; name: string; kind: string; total: string;
+    }> | null;
   }>(`
     WITH period_movements AS (
       SELECT m.amount, m.category_id, m.store,
-             c.id AS cat_id, c.name AS cat_name, c.color AS cat_color
+             c.id AS cat_id, c.name AS cat_name, c.color AS cat_color,
+             pm.id AS pm_id, pm.name AS pm_name, pm.kind AS pm_kind
       FROM movements m
       LEFT JOIN categories c ON c.id = m.category_id
+      LEFT JOIN payment_methods pm ON pm.id = m.payment_method_id
       ${dateFilter}
     ),
     grand_total AS (
@@ -154,6 +159,12 @@ router.get('/', async (req: Request, res: Response) => {
       FROM period_movements
       WHERE cat_id IS NOT NULL
       GROUP BY cat_id, cat_name, cat_color
+    ),
+    pm_totals AS (
+      SELECT pm_id, pm_name, pm_kind, SUM(amount) AS pm_total
+      FROM period_movements
+      WHERE pm_id IS NOT NULL
+      GROUP BY pm_id, pm_name, pm_kind
     ),
     top_store_cte AS (
       SELECT store
@@ -175,7 +186,16 @@ router.get('/', async (req: Request, res: Response) => {
           'total',      ct.cat_total::text
         ) ORDER BY ct.cat_total DESC)
         FROM cat_totals ct
-      ) AS category_breakdown
+      ) AS category_breakdown,
+      (
+        SELECT json_agg(json_build_object(
+          'paymentMethodId', pt.pm_id,
+          'name',            pt.pm_name,
+          'kind',            pt.pm_kind,
+          'total',           pt.pm_total::text
+        ) ORDER BY pt.pm_total DESC)
+        FROM pm_totals pt
+      ) AS payment_method_breakdown
     FROM grand_total gt
     LEFT JOIN top_store_cte ts ON true
   `, filterParams);
@@ -191,6 +211,16 @@ router.get('/', async (req: Request, res: Response) => {
     total: parseFloat(cat.total),
     percentage: grandTotal > 0
       ? Math.round((parseFloat(cat.total) / grandTotal) * 10000) / 100
+      : 0,
+  }));
+
+  const paymentMethodBreakdown = (row.payment_method_breakdown ?? []).map(pm => ({
+    paymentMethodId: pm.paymentMethodId,
+    name: pm.name,
+    kind: pm.kind,
+    total: parseFloat(pm.total),
+    percentage: grandTotal > 0
+      ? Math.round((parseFloat(pm.total) / grandTotal) * 10000) / 100
       : 0,
   }));
 
@@ -266,6 +296,7 @@ router.get('/', async (req: Request, res: Response) => {
     totalAmount: grandTotal,
     movementCount,
     categoryBreakdown,
+    paymentMethodBreakdown,
     timeSeries,
     previousPeriod,
     topStore: row.top_store,

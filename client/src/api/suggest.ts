@@ -4,6 +4,7 @@ export interface SuggestCategoryResponse {
   categoryId: number | null;
   categoryName?: string;
   color?: string;
+  suggestedNewCategory?: string | null;
 }
 
 export async function suggestCategory(params: {

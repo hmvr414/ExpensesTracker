@@ -8,8 +8,16 @@ export interface ExtractedMovement {
   rawAmountText?: string | null;
   amountSuspect?: boolean;
   date: string;
+  time?: string | null;
   description: string | null;
   store: string | null;
+  possibleDuplicate?: boolean;
+  duplicateOf?: {
+    id: number | null;
+    date: string;
+    time: string | null;
+    description: string | null;
+  } | null;
   categoryId: number | null;
   categoryName: string | null;
   color: string | null;
@@ -21,6 +29,9 @@ export interface ExtractedMovement {
   detectedBrand: string | null;
   detectedVariant: string | null;
   paymentAiSuggested: boolean;
+  // Present on movements extracted from Gmail emails
+  gmailMessageId?: string;
+  source?: 'gmail';
 }
 
 export interface ExtractResponse {
@@ -31,14 +42,30 @@ export interface ExtractResponse {
   error?: string;
 }
 
+export interface ExtractEmailResult {
+  messageId: string;
+  subject?: string | null;
+  from?: string | null;
+  date?: string | null;
+  movements: ExtractedMovement[];
+  error: string | null;
+}
+
+export interface ExtractEmailsResponse {
+  emails: ExtractEmailResult[];
+  language?: string | null;
+}
+
 export interface ConfirmMovementInput {
   amount: number;
   date: string;
+  time?: string | null;
   description?: string;
   store?: string;
   category_id?: number | null;
   new_category_name?: string;
   payment_method_id?: number | null;
+  gmail_message_id?: string;
 }
 
 export interface ConfirmInput {
@@ -64,6 +91,11 @@ export async function extractFromImage(formData: FormData): Promise<ExtractRespo
   const res = await axios.post<ExtractResponse>('/api/import/extract', formData, {
     headers: { 'Content-Type': 'multipart/form-data' },
   });
+  return res.data;
+}
+
+export async function extractFromEmails(messageIds: string[]): Promise<ExtractEmailsResponse> {
+  const res = await axios.post<ExtractEmailsResponse>('/api/import/extract-emails', { messageIds });
   return res.data;
 }
 

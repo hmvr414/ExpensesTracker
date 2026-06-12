@@ -23,6 +23,7 @@ export interface Movement {
   id: number;
   amount: string;
   date: string;
+  time?: string | null;
   description: string | null;
   store: string | null;
   category_id: number | null;
@@ -59,6 +60,7 @@ export interface GetMovementsParams {
 export interface CreateMovementInput {
   amount: number;
   date?: string;
+  time?: string | null;
   description?: string;
   store?: string;
   category_id?: number | null;
@@ -69,6 +71,7 @@ export interface CreateMovementInput {
 export interface UpdateMovementInput {
   amount?: number;
   date?: string;
+  time?: string | null;
   description?: string;
   store?: string;
   category_id?: number | null;

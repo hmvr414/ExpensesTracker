@@ -1,0 +1,122 @@
+[
+  {
+    "category": "functional",
+    "description": "Create the payment methods data model and CRUD API",
+    "steps": [
+      "Create migration `005_create-payment-methods.js`: table `payment_methods` — `id` (serial PK), `name` (text, unique, not null — e.g. 'Visa Platinum DAVIbank'), `kind` (text, not null, CHECK in 'card' | 'cash' | 'bank_transfer' | 'other'), `brand` (text, nullable — 'visa' | 'mastercard' | 'amex' | 'other'), `variant` (text, nullable — e.g. 'platinum', 'black', 'gold', 'classic'), `last4` (char(4), nullable), `created_at` (timestamptz default now); seed one default row: name 'Cash', kind 'cash'",
+      "Create migration `006_add-payment-method-to-movements.js`: add `payment_method_id` (int, nullable, FK → payment_methods ON DELETE SET NULL) to the `movements` table",
+      "`GET /api/payment-methods` — return all methods ordered by name, each with a `movement_count` computed via left join; `POST /api/payment-methods` — create with zod validation: `name` required and unique, `kind` required enum, `brand`/`variant` optional strings, `last4` optional and must be exactly 4 digits when provided",
+      "`PUT /api/payment-methods/:id` — partial update with the same validation rules, 409 on name collision excluding self; `DELETE /api/payment-methods/:id` — 409 if any movement references the method, otherwise hard-delete and return 204 (mirror the categories API semantics and `{ error, details? }` error shape)",
+      "Tests covering CRUD happy paths, name uniqueness, kind enum rejection, last4 format validation, and FK-blocked delete — same Docker test DB pattern as existing suites"
+    ],
+    "passes": true
+  },
+  {
+    "category": "functional",
+    "description": "Wire payment methods through the movements and dashboard APIs",
+    "steps": [
+      "Update `GET /api/movements` and `GET /api/movements/:id` to join `payment_methods` and include a `payment_method` object (`{ id, name, kind, brand, variant }` or null) on each returned movement",
+      "Update `POST /api/movements` and `PUT /api/movements/:id` zod schemas to accept an optional nullable `payment_method_id`; validate the referenced method exists when provided; include it in the dynamic SET clause on PUT (supporting explicit null to clear it)",
+      "Add a `payment_method_id` filter query param to `GET /api/movements`, chained with the existing from/to/category_id/store/search filters",
+      "Update `GET /api/dashboard` to also return `paymentMethodBreakdown: [{ paymentMethodId, name, kind, total, percentage }]` for the selected period, computed with GROUP BY in the same CTE round-trip style as `categoryBreakdown`",
+      "Update the `POST /api/import/confirm` zod schema (`movementItemSchema`) to accept an optional `payment_method_id` per item, validate it exists alongside the existing category_id check, and persist it in the bulk-insert transaction"
+    ],
+    "passes": true
+  },
+  {
+    "category": "ui",
+    "description": "Build the payment method management screen",
+    "steps": [
+      "Add a `/payment-methods` route and a 'Payment Methods' link in the persistent nav; render a list of all methods where each row shows a kind/brand icon (💵 cash, 💳 card with brand label, 🏦 transfer), the name, brand + variant chips, `last4` rendered as '•••• 1234' when set, and a movement count badge",
+      "Provide an 'Add Payment Method' inline form at the top: name input, kind select; when kind is 'card', reveal brand select (Visa, Mastercard, Amex, Other), variant text input (e.g. Platinum, Black, Gold), and an optional last-4-digits input; submit calls POST /api/payment-methods",
+      "Allow in-place editing of name, brand, variant, and last4 via an edit icon on the row; save on blur or Enter (mirror the categories screen interaction)",
+      "Show a delete icon per row with a confirmation popover; disable it with an explanatory tooltip showing the movement count when movements are linked; the seeded 'Cash' row is editable and deletable like any other",
+      "When only the seeded Cash method exists, show a prompt card: 'Register your first card to track how you pay' with the add form focused"
+    ],
+    "passes": true
+  },
+  {
+    "category": "ui",
+    "description": "Add payment method to the movement form and dashboard",
+    "steps": [
+      "Add a 'Paid with' select to `MovementForm.tsx` between Category and Attachments, populated from `GET /api/payment-methods` with the kind/brand icon per option; optional field, defaults to unset; include a 'Manage payment methods' link beneath it pointing to `/payment-methods`",
+      "Pre-populate the select in edit mode from the movement's `payment_method_id`; submitting sends `payment_method_id` (or null) with the create/update payload",
+      "Show a compact payment method badge (icon + short name) on each row of the Recent Movements list on the Dashboard, beside the amount; omit the badge when the movement has no payment method",
+      "Add a payment method filter dropdown to the dashboard's Recent Movements section that sets the `payment_method_id` param on `GET /api/movements`; 'All' clears the filter",
+      "Render a 'Spend by Payment Method' horizontal bar chart (Recharts) under the category donut using `paymentMethodBreakdown` from the dashboard API; hide the section entirely when the breakdown is empty"
+    ],
+    "passes": true
+  },
+  {
+    "category": "integration",
+    "description": "Detect the card used from receipt text during OCR extraction",
+    "steps": [
+      "In `POST /api/import/extract`, fetch the user's registered payment methods and include them in the extraction prompt as a list of `{ id, name, kind, brand, variant }`; instruct the model to return per movement a `paymentMethodId` matching one of the registered methods when the text identifies it (e.g. 'tarjeta Visa Platinum' in a DAVIbank notification matches a registered Visa Platinum card), matching on brand + variant even when the registered name differs",
+      "When the text clearly mentions a card but none of the registered methods match, instruct the model to instead return `detectedPaymentLabel` (the raw detected string, e.g. 'Visa Platinum') plus parsed `detectedBrand` and `detectedVariant`, leaving `paymentMethodId` null; when no payment signal exists in the text, all of these are null",
+      "Include bilingual cues in the prompt — Spanish bank notification vocabulary ('tarjeta', 'compra', 'débito', 'crédito', 'efectivo') alongside English — since receipts and bank emails arrive in both languages",
+      "Defend server-side: validate any returned `paymentMethodId` against the registered list and null it out if unknown; normalize `detectedBrand` to the canonical enum values before returning",
+      "Return `paymentMethodId`, `paymentMethodName`, `detectedPaymentLabel`, `detectedBrand`, `detectedVariant`, and `paymentAiSuggested: true/false` on each movement in the extract response; never persist at this stage — persistence happens through `POST /api/import/confirm` which already accepts `payment_method_id`"
+    ],
+    "passes": true
+  },
+  {
+    "category": "ui",
+    "description": "Payment method column in the OCR import review table",
+    "steps": [
+      "Add a 'Paid with' column to the editable review table at `/import` (Step 3): a select populated from `GET /api/payment-methods`, pre-selected from the movement's `paymentMethodId` when the AI matched a registered method, with a ✦ 'AI detected' badge beside it",
+      "When the extract response carries a `detectedPaymentLabel` with no `paymentMethodId` (unregistered card), show an inline prompt in the cell: 'Detected \"Visa Platinum\" — Register this card?'; clicking it POSTs to `/api/payment-methods` (kind 'card', name/brand/variant from the detected values), refreshes the select options, and selects the newly created method in that row",
+      "Manually changing the select clears the ✦ badge for that row, consistent with the category override behavior",
+      "Include each row's `payment_method_id` in the `POST /api/import/confirm` payload",
+      "Show the payment method (icon + name) for each created movement in the import success summary card, alongside date, store, and amount"
+    ],
+    "passes": true
+  },
+  {
+    "category": "integration",
+    "description": "Second-pass category suggestion when no existing category matches",
+    "steps": [
+      "Update the `suggestCategory` helper: when the first pass returns `categoryId: null`, make a second OpenRouter call asking the model to propose a concise new category name (1–2 words, capitalized, in the user's catalog language) that would fit the movement — e.g. 'Software' or 'AI Services' for an OPENROUTER, INC purchase; return `{ categoryId: null, suggestedNewCategory: string | null }`; keep the existing never-throw and timeout guarantees across both passes",
+      "Include `suggestedNewCategory` in the `POST /api/suggest/category` response and on each movement returned by `POST /api/import/extract`; deduplicate second-pass calls within one extraction batch via an in-process cache keyed by (store, description) so identical rows don't trigger duplicate LLM calls",
+      "Update `POST /api/movements`, `PUT /api/movements/:id`, and `POST /api/import/confirm` to accept an optional `new_category_name` (string, 1–40 chars) that is mutually exclusive with `category_id` — reject with 400 if both are provided",
+      "When `new_category_name` is provided, find-or-create the category case-insensitively inside the same transaction as the movement write: reuse an existing category on name match, otherwise create one with an auto-assigned color picked from the preset palette excluding colors already in use",
+      "Return the resolved category (`{ id, name, color, created: boolean }`) in the response so the UI can update its category list without a refetch; tests cover find-vs-create, case-insensitive matching, color auto-assignment, and the mutual-exclusion validation"
+    ],
+    "passes": true
+  },
+  {
+    "category": "ui",
+    "description": "Editable AI-suggested new category field",
+    "steps": [
+      "In the import review table, when a row has `categoryId: null` and a `suggestedNewCategory`, render the Category cell as an editable text input pre-filled with the suggestion and a ✦ 'AI suggested' badge, instead of the bare 'No category' select",
+      "Let the user freely edit the suggested word or type their own; provide a small toggle (⌄ icon) to switch the cell back to the existing-categories select if they'd rather pick one; clearing the text field also reverts to the select",
+      "On 'Import N Movements', rows with a filled text field send `new_category_name` (and no `category_id`) to `POST /api/import/confirm`; the success summary shows each newly created category with its auto-assigned color swatch",
+      "Apply the same pattern in `MovementForm`: when the debounced suggestion call returns `categoryId: null` with a `suggestedNewCategory`, show an inline 'Create category \"Software\"?' hint under the Category select; accepting switches the select to a text input pre-filled with the suggestion, and submit sends `new_category_name`",
+      "After a successful import or save that created categories, the new categories appear in the `/categories` management screen and in all category selects without a full page reload"
+    ],
+    "passes": true
+  },
+  {
+    "category": "integration",
+    "description": "Clean, context-aware description extraction",
+    "steps": [
+      "Rewrite the extraction and suggestion prompts with explicit description rules: the description must say what was purchased or what the merchant sells, NEVER the payment instrument — forbid card/payment vocabulary ('visa', 'mastercard', 'amex', 'platinum', 'black', 'gold', 'tarjeta', 'card', 'cash', 'efectivo', 'débito', 'crédito', 'transaction', 'compra') and bank-notification boilerplate; for bank notification emails (like DAVIbank purchase alerts) the description must describe the merchant's product or service, not the notification itself",
+      "Add a server-side sanitizer as defense-in-depth: after the model returns, strip any description that is predominantly payment vocabulary (regex over the forbidden term list); when sanitizing empties the description, fall back to a cleaned store name so the field is never a payment method",
+      "Add historical context: in `POST /api/import/extract` and the description path of the suggest helpers, query up to 10 most recent distinct descriptions the user previously saved for the same store and include them in the prompt as 'descriptions this user previously wrote for this store' — preferring consistency with the user's own wording",
+      "Add web enrichment for unknown stores: create migration `007_create-store-context.js` — table `store_context` (`store` text PK normalized lowercase, `summary` text, `fetched_at` timestamptz); when a store has no prior movements and no cached context, make one OpenRouter call with the web search plugin (append `:online` to the model slug) asking for a one-sentence summary of what the merchant sells, store the result, and skip silently on timeout or failure (5-second cap) — each store is searched at most once, ever",
+      "Inject the cached `store_context.summary` into both the description prompt and the `suggestCategory` prompt so category matching benefits from the same knowledge (e.g. 'OPENROUTER, INC — AI model API provider' resolves both 'AI Services' category and a sane description); tests mock the web-enabled call and assert the cache prevents repeat searches"
+    ],
+    "passes": true
+  },
+  {
+    "category": "integration",
+    "description": "Locale-aware amount separator parsing during OCR extraction",
+    "steps": [
+      "Update the extraction prompt to require two amount fields per movement: `rawAmountText` (the amount string exactly as it appears on the receipt, e.g. '40,313' or '1.234,56') and `amount` (the model's normalized plain JSON number); instruct the model to use receipt cues — language (Spanish vs. English), currency symbols/codes (COP, $, USD, EUR), and digit grouping — to disambiguate, noting that in Spanish-language receipts ',' and '.' are commonly thousands separators (COP amounts rarely carry decimals), so '40,313' on a DAVIbank notification is forty thousand, not forty point three",
+      "Create `api/src/helpers/parseAmount.ts` — exported `parseAmount(rawText, localeHint?)` deterministic normalizer: when both separators are present the last one is the decimal separator ('1.234,56' → 1234.56, '1,234.56' → 1234.56); when a single separator is followed by exactly 3 digits and the locale hint is Spanish/COP (or the value has no other decimal evidence), treat it as a thousands separator ('40,313' → 40313); when followed by 1–2 digits, treat it as a decimal ('40,31' → 40.31); strip currency symbols, codes, and whitespace before parsing",
+      "In `POST /api/import/extract`, run `parseAmount(rawAmountText, localeHint)` server-side and compare against the model's `amount`: when they agree, return the value with `amountSuspect: false`; when they disagree, prefer the deterministic `parseAmount` result and return `amountSuspect: true` plus `rawAmountText` so the UI can flag it; derive `localeHint` from the receipt language the model reports (add a top-level `language` field to the extraction response)",
+      "In the import review table, show a ⚠ warning icon beside the Amount cell when `amountSuspect` is true, with a tooltip showing the original receipt text ('Receipt shows \"40,313\" — please verify'); editing the amount manually clears the flag; suspect rows do not block confirmation",
+      "Tests for `parseAmount` covering '40,313' (COP thousands → 40313), '40.313' (Spanish thousands → 40313), '1.234,56' (→ 1234.56), '1,234.56' (→ 1234.56), '40,31' (→ 40.31), '$ 40.313 COP' (symbol stripping), and plain '40313'; extraction tests assert the suspect flag is set when model and parser disagree"
+    ],
+    "passes": true
+  }
+]

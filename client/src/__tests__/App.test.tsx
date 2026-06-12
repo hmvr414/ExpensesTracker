@@ -1,7 +1,27 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import { AppRoutes } from '../App';
+
+vi.mock('../pages/Dashboard', () => ({
+  Dashboard: () => <h1>Dashboard</h1>,
+}));
+
+vi.mock('../pages/Import', () => ({
+  Import: () => <h1>Import</h1>,
+}));
+
+vi.mock('../pages/Categories', () => ({
+  Categories: () => <h1>Categories</h1>,
+}));
+
+vi.mock('../pages/PaymentMethods', () => ({
+  PaymentMethods: () => <h1>Payment Methods</h1>,
+}));
+
+vi.mock('../pages/GmailSettings', () => ({
+  GmailSettings: () => <h1>Gmail Settings</h1>,
+}));
 
 function renderAt(path: string) {
   return render(
@@ -12,6 +32,10 @@ function renderAt(path: string) {
 }
 
 describe('AppRoutes', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
   it('renders Dashboard page at /', () => {
     renderAt('/');
     expect(screen.getByRole('heading', { name: /dashboard/i })).toBeInTheDocument();
@@ -30,5 +54,10 @@ describe('AppRoutes', () => {
   it('renders Payment Methods page at /payment-methods', () => {
     renderAt('/payment-methods');
     expect(screen.getByRole('heading', { name: /payment methods/i })).toBeInTheDocument();
+  });
+
+  it('renders Gmail Settings page at /settings/gmail', async () => {
+    renderAt('/settings/gmail');
+    expect(await screen.findByRole('heading', { name: /gmail settings/i })).toBeInTheDocument();
   });
 });

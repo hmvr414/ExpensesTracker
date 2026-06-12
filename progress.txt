@@ -317,3 +317,113 @@ The container was left running for the next session.
 
 Remaining items in prd.json with passes: false:
 None — all 10 PRD items are now complete.
+
+--- 2026-06-11 ---
+Feature completed: Gmail OAuth connection and token storage (KAN-10 PRD item 1, functional)
+
+Chose this because it is the root dependency of the whole Gmail-import PRD: features 2 (message
+listing), 3 (extract-emails), and 10 (background poller) all consume getGmailClient(), and the UI
+items depend on /api/gmail/status + /auth-url. Nothing Gmail-related existed in the codebase.
+
+What was implemented:
+- npm dep: googleapis added to api/. NOTE: had to run `npm dedupe` afterwards — googleapis pulls
+  two copies of google-auth-library (top-level 10.7.0 + nested 10.5.0 under googleapis-common)
+  whose OAuth2Client types are incompatible, breaking `google.gmail({ auth })` compilation.
+  package-lock now holds a single deduped 10.5.0. If a future `npm install` reintroduces the
+  split, dedupe again.
+- api/migrations/008_create-gmail-connection.js: single-row table gmail_connection (id, google_
+  email, access_token, refresh_token, token_expiry, connected_at). Reconnecting replaces the row
+  (DELETE + INSERT inside a transaction in the callback route).
+- api/src/helpers/gmailClient.ts: GmailError (code: GMAIL_NOT_CONNECTED | GMAIL_AUTH_EXPIRED),
+  createOAuth2Client() (reads GOOGLE_* env at call time, NOT module load — tests rely on this),
+  getConnection(), and getGmailClient() which refreshes via refresh_token when token_expiry is
+  within 60 s of now (EXPIRY_SKEW_MS), persists the new access_token + expiry, and throws
+  GMAIL_AUTH_EXPIRED on refresh failure (row left intact so status still shows the address).
+- api/src/routes/gmail.ts mounted at /api/gmail in app.ts:
+  - GET /auth-url — URL built manually with URLSearchParams (deterministic, no googleapis call):
+    scope gmail.readonly, access_type=offline, prompt=consent; 500 `{ error }` naming the first
+    missing env var (checks GOOGLE_CLIENT_ID then GOOGLE_REDIRECT_URI).
+  - GET /oauth/callback — getToken(code) → users.getProfile → transactional row replace →
+    redirect to <client>/settings/gmail?gmail=connected, or ?gmail=error&reason=<slug> on every
+    failure path (missing_code, not_configured, no_access_token, no_refresh_token,
+    no_profile_email, token_exchange_failed). Client base for the redirect: CLIENT_URL env if
+    set, else '' in production (API serves the SPA), else http://localhost:5173 (dev).
+  - GET /status — { connected, email, connectedAt }, never tokens.
+  - DELETE /connection — best-effort revokeToken(refresh_token) (failures swallowed), row
+    deleted, 204 (also 204 when nothing was connected).
+- README: GOOGLE_CLIENT_ID/SECRET/REDIRECT_URI in the env table, new "Gmail integration setup"
+  section with the Cloud Console walkthrough and the warning that the consent screen must be
+  published to 'In production' (Testing status expires refresh tokens after 7 days). .env.example
+  extended with the three vars.
+
+Testing pattern for the next features: gmail-connection.test.ts mocks googleapis with a factory
+that ALSO returns a `__mocks` object (mockGetToken, mockRefreshAccessToken, mockRevokeToken,
+mockGetProfile, gmail factory...) retrieved via jest.requireMock('googleapis') — jest.mock
+hoisting forbids referencing top-level consts from the factory. Reuse/extend this for the
+messages-listing and extract-emails suites.
+
+Environment notes:
+- The podman test DB from the previous session (expenses-test-db, port 5433) is still running
+  and was reused.
+- client/node_modules was EMPTY in this worktree — ran `npm install --prefix client` to build/
+  test. The "Jest did not exit one second after tests" warning is pre-existing (shared pool from
+  resetPool() is never ended) and harmless; the suite completes.
+
+Tests: 275 API (17 new in gmail-connection.test.ts) + 200 client = 475. Builds: api/ and client/
+compile cleanly.
+
+Remaining items in prd.json with passes: false (KAN-10):
+2. Sender filters and candidate email listing API  ← natural next pick (only needs this feature)
+3. Shared text-extraction core and email body extraction endpoint
+4. Import confirmation with Gmail deduplication
+5. Gmail connection settings screen (ui)
+6. Gmail email picker in the import flow (ui)
+7. Review and confirm Gmail-extracted movements (ui)
+8. Time-of-day field on movements
+9. Extract time during import and flag possible duplicate movements
+10. Background Gmail polling into a pending import queue
+11. Pending imports inbox and notification badge (ui)
+
+--- 2026-06-12 ---
+Feature completed: Review and confirm Gmail-extracted movements (KAN-10 PRD item 7, ui)
+
+Chose this because it was the last missing link in the end-to-end Gmail flow (connect → senders →
+pick emails → extract → REVIEW/CONFIRM); items 1–6 were already done and the backend confirm route
+already accepted gmail_message_id + returned the 409 alreadyImported shape. All client-side; zero
+backend changes.
+
+What was implemented (client/src/pages/Import.tsx + client/src/api/import.ts types):
+- ReviewRow now carries gmailMessageId, emailSubject/emailFrom/emailDate, and alreadyImported.
+  movementToRow(m, email?) takes the optional ExtractEmailResult envelope; the gmail id comes from
+  email.messageId with movement.gmailMessageId as fallback. NOTE: the OCR path had to change from
+  .map(movementToRow) to .map((m) => movementToRow(m)) — point-free map passes the index as the
+  2nd arg and breaks the build.
+- Source column: rendered only when ≥1 row has a gmailMessageId (hidden entirely for upload
+  imports). Cell (data-testid="source-cell") shows the truncated email subject with a title
+  tooltip of "from · localized date".
+- Confirm payload includes gmail_message_id per row (undefined for OCR rows — vitest toEqual and
+  axios JSON both ignore undefined keys, so existing payload assertions stay green).
+- 409 handling: rows whose gmailMessageId is in response details.alreadyImported get
+  alreadyImported: true → dimmed row + 'Already imported' badge (already-imported-badge) in the
+  Source cell, excluded from validRows and from the next confirm payload; the user imports the
+  rest without re-extracting. The email list state is also marked imported.
+- Zero-movement extraction (no per-email errors) now still moves to the review step, which shows
+  'No movements found in the selected emails' + a Back to email list button (new reviewSource
+  state distinguishes gmail vs upload empty states). Previously this case silently did nothing.
+- Success summary: 'N email(s) marked as imported.' line (imported-emails-summary) + a
+  '← Back to Gmail emails' button (resets review state, returns to the gmail tab). Badge refresh
+  is a LOCAL gmailMessages state update after confirm — deliberately no refetch, satisfying the
+  PRD's 'without a full page reload' (and the test asserts getGmailMessages is NOT called again).
+
+Tests: 318 API (unchanged) + 232 client (7 new in Import.test.tsx, describe 'Gmail review and
+confirm') = 550. Builds: api/ and client/ compile cleanly.
+
+Environment note: the podman test DB (expenses-test-db, port 5433) had exited; `podman start
+expenses-test-db` brought it back and it was left running for the next session.
+
+Remaining items in prd.json with passes: false (KAN-10):
+8.  Time-of-day field on movements (functional) ← natural next pick: prerequisite for item 9,
+    self-contained (one migration + zod + ordering + form input)
+9.  Extract time during import and flag possible duplicate movements (integration, needs 8)
+10. Background Gmail polling into a pending import queue (functional)
+11. Pending imports inbox and notification badge (ui, needs 10)

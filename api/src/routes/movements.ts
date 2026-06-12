@@ -3,6 +3,7 @@ import { promises as fs } from 'fs';
 import { z } from 'zod';
 import db, { getPool } from '../db';
 import { resolveCategoryByName } from '../helpers/categoryResolver';
+import { TIME_FIELD, normalizeTime } from '../helpers/timeField';
 
 const router = Router();
 
@@ -17,6 +18,7 @@ const NEW_CATEGORY_NAME = z
 const createSchema = z.object({
   amount: z.number().positive('amount must be a positive number'),
   date: z.string().regex(ISO_DATE, 'date must be ISO format YYYY-MM-DD').optional(),
+  time: TIME_FIELD.optional(),
   description: z.string().optional(),
   store: z.string().optional(),
   category_id: z.number().int().positive().nullable().optional(),
@@ -27,6 +29,7 @@ const createSchema = z.object({
 const updateSchema = z.object({
   amount: z.number().positive('amount must be a positive number').optional(),
   date: z.string().regex(ISO_DATE, 'date must be ISO format YYYY-MM-DD').optional(),
+  time: TIME_FIELD.optional(),
   description: z.string().optional(),
   store: z.string().optional(),
   category_id: z.number().int().positive().nullable().optional(),
@@ -53,6 +56,11 @@ const PAYMENT_METHOD_JSON = `
        ELSE json_build_object('id', pm.id, 'name', pm.name, 'kind', pm.kind,
                               'brand', pm.brand, 'variant', pm.variant)
   END AS payment_method`;
+
+// Appended after a wildcard select so the alias overrides the raw
+// HH:MM:SS column value — the API always exposes time as HH:MM.
+const TIME_HHMM = `to_char(m.time, 'HH24:MI') AS time`;
+const TIME_HHMM_BARE = `to_char(time, 'HH24:MI') AS time`;
 
 function validationError(err: z.ZodError, res: Response): void {
   const details: Record<string, string> = {};
@@ -93,7 +101,7 @@ router.get('/', async (req: Request, res: Response) => {
   const offsetIdx = params.push(offset);
 
   const result = await db.query(
-    `SELECT m.*,
+    `SELECT m.*, ${TIME_HHMM},
             c.name AS category_name, c.color AS category_color,
             ${PAYMENT_METHOD_JSON},
             COALESCE(json_agg(a ORDER BY a.created_at) FILTER (WHERE a.id IS NOT NULL), '[]') AS attachments
@@ -103,7 +111,7 @@ router.get('/', async (req: Request, res: Response) => {
      LEFT JOIN attachments a ON a.movement_id = m.id
      ${where}
      GROUP BY m.id, c.name, c.color, pm.id
-     ORDER BY m.date DESC, m.created_at DESC
+     ORDER BY m.date DESC, m.time DESC NULLS LAST, m.created_at DESC
      LIMIT $${limitIdx} OFFSET $${offsetIdx}`,
     params
   );
@@ -115,7 +123,7 @@ router.get('/:id', async (req: Request, res: Response) => {
   const id = parseInt(req.params.id, 10);
 
   const result = await db.query(
-    `SELECT m.*,
+    `SELECT m.*, ${TIME_HHMM},
             c.name AS category_name, c.color AS category_color,
             ${PAYMENT_METHOD_JSON},
             COALESCE(json_agg(a ORDER BY a.created_at) FILTER (WHERE a.id IS NOT NULL), '[]') AS attachments
@@ -143,8 +151,9 @@ router.post('/', async (req: Request, res: Response) => {
     return;
   }
 
-  const { amount, date, description, store, category_id, payment_method_id, new_category_name } = parsed.data;
+  const { amount, date, time, description, store, category_id, payment_method_id, new_category_name } = parsed.data;
   const dateValue = date ?? new Date().toISOString().split('T')[0];
+  const timeValue = normalizeTime(time);
 
   if (new_category_name !== undefined && category_id != null) {
     bothCategoryFieldsError(res);
@@ -170,10 +179,10 @@ router.post('/', async (req: Request, res: Response) => {
       await client.query('BEGIN');
       const resolved = await resolveCategoryByName(client, new_category_name);
       const result = await client.query(
-        `INSERT INTO movements (amount, date, description, store, category_id, payment_method_id)
-         VALUES ($1, $2, $3, $4, $5, $6)
-         RETURNING *`,
-        [amount, dateValue, description ?? null, store ?? null, resolved.id, payment_method_id ?? null]
+        `INSERT INTO movements (amount, date, time, description, store, category_id, payment_method_id)
+         VALUES ($1, $2, $3, $4, $5, $6, $7)
+         RETURNING *, ${TIME_HHMM_BARE}`,
+        [amount, dateValue, timeValue, description ?? null, store ?? null, resolved.id, payment_method_id ?? null]
       );
       await client.query('COMMIT');
       res.status(201).json({ ...result.rows[0], category: resolved });
@@ -187,10 +196,10 @@ router.post('/', async (req: Request, res: Response) => {
   }
 
   const result = await db.query(
-    `INSERT INTO movements (amount, date, description, store, category_id, payment_method_id)
-     VALUES ($1, $2, $3, $4, $5, $6)
-     RETURNING *`,
-    [amount, dateValue, description ?? null, store ?? null, category_id ?? null, payment_method_id ?? null]
+    `INSERT INTO movements (amount, date, time, description, store, category_id, payment_method_id)
+     VALUES ($1, $2, $3, $4, $5, $6, $7)
+     RETURNING *, ${TIME_HHMM_BARE}`,
+    [amount, dateValue, timeValue, description ?? null, store ?? null, category_id ?? null, payment_method_id ?? null]
   );
 
   res.status(201).json(result.rows[0]);
@@ -211,7 +220,7 @@ router.put('/:id', async (req: Request, res: Response) => {
     return;
   }
 
-  const { amount, date, description, store, category_id, payment_method_id, new_category_name } = parsed.data;
+  const { amount, date, time, description, store, category_id, payment_method_id, new_category_name } = parsed.data;
 
   if (new_category_name !== undefined && category_id != null) {
     bothCategoryFieldsError(res);
@@ -236,6 +245,7 @@ router.put('/:id', async (req: Request, res: Response) => {
 
   if (amount !== undefined) { sets.push(`amount = $${values.push(amount)}`); }
   if (date !== undefined) { sets.push(`date = $${values.push(date)}`); }
+  if ('time' in parsed.data) { sets.push(`time = $${values.push(normalizeTime(time))}`); }
   if (description !== undefined) { sets.push(`description = $${values.push(description)}`); }
   if (store !== undefined) { sets.push(`store = $${values.push(store)}`); }
   if ('category_id' in parsed.data && new_category_name === undefined) { sets.push(`category_id = $${values.push(category_id ?? null)}`); }
@@ -250,7 +260,7 @@ router.put('/:id', async (req: Request, res: Response) => {
       sets.push('updated_at = now()');
       values.push(id);
       const result = await client.query(
-        `UPDATE movements SET ${sets.join(', ')} WHERE id = $${values.length} RETURNING *`,
+        `UPDATE movements SET ${sets.join(', ')} WHERE id = $${values.length} RETURNING *, ${TIME_HHMM_BARE}`,
         values
       );
       await client.query('COMMIT');
@@ -267,14 +277,14 @@ router.put('/:id', async (req: Request, res: Response) => {
   sets.push('updated_at = now()');
 
   if (sets.length === 1) {
-    const row = await db.query(`SELECT * FROM movements WHERE id = $1`, [id]);
+    const row = await db.query(`SELECT *, ${TIME_HHMM_BARE} FROM movements WHERE id = $1`, [id]);
     res.json(row.rows[0]);
     return;
   }
 
   values.push(id);
   const result = await db.query(
-    `UPDATE movements SET ${sets.join(', ')} WHERE id = $${values.length} RETURNING *`,
+    `UPDATE movements SET ${sets.join(', ')} WHERE id = $${values.length} RETURNING *, ${TIME_HHMM_BARE}`,
     values
   );
 

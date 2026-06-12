@@ -28,6 +28,7 @@ const mockCreatedMovement = {
   id: 99,
   amount: '50.00',
   date: '2026-06-09',
+  time: null,
   description: null,
   store: null,
   category_id: null,
@@ -44,6 +45,7 @@ const mockExistingMovement = {
   id: 42,
   amount: '99.99',
   date: '2026-06-01',
+  time: '14:32',
   description: 'Test description',
   store: 'TestStore',
   category_id: 1,
@@ -125,6 +127,7 @@ describe('MovementForm', () => {
   it('renders core form fields', () => {
     renderForm();
     expect(screen.getByPlaceholderText('0.00')).toBeInTheDocument();
+    expect(screen.getByLabelText(/time/i)).toBeInTheDocument();
     expect(screen.getByPlaceholderText('e.g. Walmart')).toBeInTheDocument();
     expect(screen.getByPlaceholderText('e.g. Weekly groceries')).toBeInTheDocument();
   });
@@ -186,10 +189,22 @@ describe('MovementForm', () => {
     renderForm();
     fireEvent.change(screen.getByPlaceholderText('0.00'), { target: { value: '50.00' } });
     fireEvent.change(screen.getByPlaceholderText('e.g. Walmart'), { target: { value: 'Costco' } });
+    fireEvent.change(screen.getByLabelText(/time/i), { target: { value: '14:32' } });
     fireEvent.click(screen.getByRole('button', { name: /add expense/i }));
     await waitFor(() => {
       expect(movementsApi.createMovement).toHaveBeenCalledWith(
-        expect.objectContaining({ amount: 50, store: 'Costco' })
+        expect.objectContaining({ amount: 50, store: 'Costco', time: '14:32' })
+      );
+    });
+  });
+
+  it('submits null time when the time field is empty', async () => {
+    renderForm();
+    fireEvent.change(screen.getByPlaceholderText('0.00'), { target: { value: '50.00' } });
+    fireEvent.click(screen.getByRole('button', { name: /add expense/i }));
+    await waitFor(() => {
+      expect(movementsApi.createMovement).toHaveBeenCalledWith(
+        expect.objectContaining({ time: null })
       );
     });
   });
@@ -444,6 +459,7 @@ describe('MovementForm', () => {
     await waitFor(() => {
       expect(screen.getByDisplayValue('99.99')).toBeInTheDocument();
       expect(screen.getByDisplayValue('TestStore')).toBeInTheDocument();
+      expect(screen.getByLabelText(/time/i)).toHaveValue('14:32');
     });
   });
 
@@ -460,6 +476,18 @@ describe('MovementForm', () => {
     await waitFor(() => {
       expect(movementsApi.updateMovement).toHaveBeenCalledWith(42, expect.any(Object));
       expect(movementsApi.createMovement).not.toHaveBeenCalled();
+    });
+  });
+
+  it('sends null time when the time field is cleared in edit mode', async () => {
+    renderForm({ movement: mockExistingMovement });
+    fireEvent.change(screen.getByLabelText(/time/i), { target: { value: '' } });
+    fireEvent.click(screen.getByRole('button', { name: /save changes/i }));
+    await waitFor(() => {
+      expect(movementsApi.updateMovement).toHaveBeenCalledWith(
+        42,
+        expect.objectContaining({ time: null })
+      );
     });
   });
 

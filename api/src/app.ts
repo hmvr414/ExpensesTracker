@@ -9,6 +9,7 @@ import attachmentsRouter from './routes/attachments';
 import suggestRouter from './routes/suggest';
 import importRouter from './routes/import';
 import dashboardRouter from './routes/dashboard';
+import gmailRouter from './routes/gmail';
 import { errorHandler } from './middleware/errorHandler';
 
 const VERSION = process.env.npm_package_version ?? '1.0.0';
@@ -53,6 +54,7 @@ export function createApp(): express.Application {
   app.use('/api/suggest', suggestRouter);
   app.use('/api/import', importRouter);
   app.use('/api/dashboard', dashboardRouter);
+  app.use('/api/gmail', gmailRouter);
 
   if (process.env.NODE_ENV === 'production') {
     const clientDist = path.resolve(__dirname, '../../client/dist');

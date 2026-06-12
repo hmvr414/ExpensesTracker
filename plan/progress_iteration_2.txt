@@ -1,0 +1,291 @@
+## Iteration 2 — KAN-9: Improve category and description prediction, add payment method field
+
+### Starting state
+All 16 iteration-1 features are complete (see prd_iteration_1.json / progress_iteration_1.txt). Full test suite: 111 API tests (Jest) + 89 client tests (Vitest) = 200 tests green. Both TypeScript builds clean.
+
+### Motivating example
+A DAVIbank Visa Platinum notification email for a purchase at OPENROUTER, INC currently parses as:
+- Description: "Visa Platinum transaction" (payment method leaked into the description)
+- Category: unresolved ("No category")
+- Payment method: not captured at all (no such field existed)
+
+### Design decisions
+- Payment methods are user-registered entities (cards with brand/variant/last4, plus cash/transfer), not a fixed enum — enables AI matching of "tarjeta Visa Platinum" to a registered card and per-method reports in future iterations.
+- When no existing category matches, a second LLM pass suggests a new category word shown in an editable text field; confirming auto-creates the category (find-or-create, auto-assigned color).
+- Description quality strategy (3 layers): (1) prompt rules + server-side sanitizer forbidding payment vocabulary, (2) the user's previous descriptions for the same store as prompt context, (3) one-time web enrichment per unknown store via OpenRouter's web search plugin (`:online` model suffix), cached in a `store_context` table. Google scraping rejected (ToS/brittle); Wikipedia rejected (poor merchant coverage).
+- Amount separator ambiguity ("40,313" COP parsed as 40.313): the model returns both `rawAmountText` and a normalized `amount`; a deterministic `parseAmount` helper re-parses the raw text server-side with locale heuristics and wins on disagreement, flagging the row `amountSuspect` so the review UI shows a ⚠ verify hint.
+
+### Backlog (in priority order)
+1. Create the payment methods data model and CRUD API
+2. Wire payment methods through the movements and dashboard APIs
+3. Build the payment method management screen
+4. Add payment method to the movement form and dashboard
+5. Detect the card used from receipt text during OCR extraction
+6. Payment method column in the OCR import review table
+7. Second-pass category suggestion when no existing category matches
+8. Editable AI-suggested new category field
+9. Clean, context-aware description extraction
+10. Locale-aware amount separator parsing during OCR extraction
+
+---
+
+--- 2026-06-10 ---
+Feature completed: Create the payment methods data model and CRUD API (backlog #1)
+
+Implemented (nothing existed before — verified via grep for payment_method across api/, client/, migrations/):
+
+- api/migrations/005_create-payment-methods.js: `payment_methods` table — id serial PK, name text
+  unique not null, kind text not null with CHECK in ('card','cash','bank_transfer','other'),
+  brand text nullable, variant text nullable, last4 char(4) nullable, created_at timestamptz
+  default now(). Seeds one row: name 'Cash', kind 'cash' (ON CONFLICT DO NOTHING, same idiom as
+  004_seed-categories). Down drops the table.
+
+- api/migrations/006_add-payment-method-to-movements.js: adds `payment_method_id` int nullable
+  FK → payment_methods ON DELETE SET NULL on `movements`. Both migrations verified up AND down
+  against the Docker test DB.
+
+- api/src/routes/payment-methods.ts (registered at /api/payment-methods in app.ts), mirroring
+  the categories route exactly:
+  - GET / — all methods ordered by name, movement_count via LEFT JOIN movements
+  - POST / — zod: name required, kind required enum, brand optional enum
+    (visa|mastercard|amex|other), variant optional string, last4 optional /^\d{4}$/;
+    409 on unique violation (pg error 23505)
+  - PUT /:id — partial update, COALESCE SET, 404 unknown id, 409 on name collision excluding
+    self, same validation
+  - DELETE /:id — 404 unknown, 409 if any movement references it, else hard-delete + 204
+  - Error shape everywhere: { error, details? } with details keyed by zod issue path
+
+- api/src/__tests__/payment-methods.test.ts: 23 tests (TDD — written first, all red, then green)
+  covering CRUD happy paths, seeded Cash row, name ordering, movement_count, name uniqueness
+  (POST and PUT incl. no-self-collision), kind/brand enum rejection, last4 format (123, 12345,
+  abcd, 12a4 all rejected), FK-blocked delete, and ON DELETE SET NULL behavior.
+
+Tests: 141 API (was 118) + 126 client = 267 total, all green. Both api/ and client/ tsc builds clean.
+
+Notes for the next person:
+- node_modules were not installed in this worktree; ran npm install at root, api/, client/.
+- Backlog #2 (wire payment methods through movements/dashboard APIs) is next: movements
+  routes do NOT yet accept/return payment_method_id — only the column + CRUD exist.
+- last4 column is char(4); values are validated as exactly 4 digits so no padding issues.
+- prd.json updated: feature 1 passes → true.
+
+--- 2026-06-10 ---
+Feature completed: Wire payment methods through the movements and dashboard APIs (backlog #2)
+
+Verified first via grep that nothing existed: movements.ts, dashboard.ts, and import.ts had zero
+payment_method references (only the CRUD route from backlog #1 existed). TDD: wrote
+api/src/__tests__/payment-method-wiring.test.ts first (18 tests, 15 red), then implemented.
+
+Changes:
+- api/src/routes/movements.ts:
+  - GET / and GET /:id now LEFT JOIN payment_methods and return a `payment_method` object
+    ({ id, name, kind, brand, variant }) or null on each movement, via a shared
+    PAYMENT_METHOD_JSON CASE/json_build_object fragment; GROUP BY extended with pm.id
+    (PK functional dependency covers the rest).
+  - createSchema/updateSchema accept optional nullable `payment_method_id` (int, positive);
+    POST and PUT validate the referenced method exists (400 with
+    details.payment_method_id otherwise, same shape as the category check).
+  - PUT supports explicit null to clear the method ('payment_method_id' in parsed.data
+    gates the dynamic SET clause, same idiom as category_id).
+  - GET / accepts a `payment_method_id` query filter, chained with from/to/category_id/
+    store/search.
+- api/src/routes/dashboard.ts: period_movements CTE now joins payment_methods; new pm_totals
+  CTE + json_agg subselect returns `paymentMethodBreakdown`
+  [{ paymentMethodId, name, kind, total, percentage }] ordered by total DESC, percentages
+  computed against the grand total exactly like categoryBreakdown; [] when no movement in the
+  period has a method.
+- api/src/routes/import.ts: movementItemSchema accepts optional nullable `payment_method_id`;
+  /confirm validates each item's method exists (per-item error key
+  movements.N.payment_method_id, nothing persisted on failure) and persists the column in the
+  bulk-insert transaction.
+
+Tests: 159 API (was 141; +18 in payment-method-wiring.test.ts) + 126 client = 285 total, all
+green. Both api/ and client/ tsc builds clean; client vite build clean.
+
+Notes for the next person:
+- IMPORTANT: run API tests with `npm test` (which is `jest --runInBand`), NOT bare `npx jest`.
+  The suites share one Docker test DB (test-pg on :5433) and run migrations in beforeAll;
+  parallel workers hit the node-pg-migrate lock ("Another migration is already running") and
+  fixture collisions. This cost me a debugging round.
+- The pre-existing "Jest did not exit one second after the test run" warning is unrelated
+  (open pg pool handle somewhere); tests all pass.
+- Backlog #3 (payment method management screen, /payment-methods route in the client) and
+  #4 (movement form + dashboard UI) are now unblocked: the API returns/accepts everything
+  they need. Client code has no payment-method awareness yet (grep confirms).
+- prd.json updated: feature 2 passes → true.
+
+--- 2026-06-10 ---
+Feature completed: Build the payment method management screen (backlog #3)
+
+Verified first that the client had zero payment-method code (grep -ri payment client/src → nothing).
+TDD: wrote client/src/__tests__/PaymentMethods.test.tsx first (24 tests, red), then implemented.
+
+Created:
+- client/src/api/paymentMethods.ts — PaymentMethod types (kind/brand unions) + getPaymentMethods,
+  createPaymentMethod, updatePaymentMethod, deletePaymentMethod (bare axios, same idiom as
+  categories.ts).
+- client/src/pages/PaymentMethods.tsx — mirrors Categories.tsx structure:
+  - Row: kind icon (💵 cash, 💳 card, 🏦 bank_transfer, 💼 other), name, brand chip (capitalized
+    label) + variant chip for cards, last4 rendered as '•••• 1234', movement count badge.
+  - Add form at top: name input + kind select (default 'card'); brand select (Visa/Mastercard/
+    Amex/Other), variant input, and last-4 input revealed only when kind === 'card'. Optional
+    fields are omitted from the POST payload when empty (server zod has .optional(), not
+    .nullable(), on POST).
+  - Inline edit via edit icon: name + (for cards) brand select, variant, last4. Save on Enter or
+    when focus leaves the edit container (container onBlur with relatedTarget check — improves on
+    the Categories name-input-only blur so editing brand/variant doesn't trigger a premature save).
+  - Delete with confirmation popover; disabled + title tooltip showing movement count when linked;
+    the seeded Cash row is editable/deletable like any other (no special-casing).
+  - Prompt card 'Register your first card to track how you pay' + auto-focused name input when
+    the list is empty or only contains the seeded cash method.
+- Route /payment-methods added to App.tsx; 'Payment Methods' NavLink added to Nav.tsx
+  (Nav.test.tsx and App.test.tsx updated accordingly — Nav 'categories' query tightened to
+  /^categories$/i since 'Payment Methods' doesn't collide but the old 3-route test name did).
+
+Gotcha worth knowing: the add form's selects contain option labels 'Cash' and 'Visa', which
+collide with row text in RTL queries — tests scope those with { selector: 'span' }. If you add
+tests to this page, prefer scoped queries.
+
+Tests: 159 API + 152 client (was 126; +24 PaymentMethods, +1 Nav, +1 App) = 311 total, all green.
+Both tsc builds clean; vite production build clean.
+
+Remaining backlog (passes: false): #4 movement form + dashboard payment-method UI (now fully
+unblocked — API and management screen both exist), #5 OCR card detection, #6 import review
+column, #7 second-pass category suggestion, #8 editable AI category field, #9 description
+extraction, #10 amount separator parsing.
+prd.json updated: feature 3 ('Build the payment method management screen') passes → true.
+
+--- 2026-06-10 ---
+Feature completed: Add payment method to the movement form and dashboard (backlog #4)
+
+Selected as highest priority because it completes the end-to-end payment-method flow: backend CRUD,
+movements/dashboard API wiring, and the /payment-methods screen all existed, but nothing let a user
+assign or see a payment method on a movement. Verified first that MovementForm.tsx and Dashboard.tsx
+had zero payment-method code (grep payment client/src → only PaymentMethods page + api module).
+
+TDD: extended MovementForm.test.tsx (+7) and Dashboard.test.tsx (+7 new, 2 updated) first — 12 red —
+then implemented.
+
+Changes:
+- client/src/api/movements.ts: Movement now carries `payment_method_id` and a `payment_method`
+  object ({ id, name, kind, brand, variant } | null) — both already returned by the API (SELECT m.*
+  + PAYMENT_METHOD_JSON in api/src/routes/movements.ts); Create/UpdateMovementInput accept optional
+  nullable `payment_method_id`; GetMovementsParams accepts a `payment_method_id` filter.
+- client/src/api/dashboard.ts: added PaymentMethodBreakdown type and `paymentMethodBreakdown` to
+  DashboardData (matches GET /api/dashboard).
+- client/src/helpers/paymentMethod.ts (new): shared `paymentMethodIcon(kind)` emoji helper.
+  PaymentMethods.tsx still has its own private kindIcon copy — consolidate if you touch that file.
+- client/src/components/MovementForm.tsx: 'Paid with' select between Category and Attachments,
+  icon-labelled options from GET /api/payment-methods; 'Manage payment methods' react-router Link
+  to /payment-methods (form tests now wrap it in MemoryRouter); pre-populates from
+  movement.payment_method_id in edit mode; create/update payloads always send payment_method_id
+  (null when unset, which clears it on PUT).
+- client/src/pages/Dashboard.tsx: compact badge (icon + name, data-testid="pm-badge") on Recent
+  Movements rows beside the amount, omitted when payment_method is null; 'Filter by payment method'
+  select in the Recent Movements header ('All payment methods' clears the param) — pmFilter lives in
+  the main fetch effect deps so changing it refetches; 'Spend by Payment Method' horizontal Recharts
+  BarChart (layout="vertical") added to the charts grid with lg:order-last so it lands under the
+  category donut; section hidden entirely when paymentMethodBreakdown is empty.
+
+Gotchas for the next person:
+- The recharts mock in Dashboard.test.tsx renders every BarChart as data-testid="bar-chart"; there
+  are now two — use getAllByTestId.
+- client tsc type-checks src/__tests__: new required fields on Movement/DashboardData require
+  updating the mock objects in Dashboard.test.tsx and MovementForm.test.tsx.
+- The existing 'clears AI suggested badge' test used getByRole('combobox'); with two selects in the
+  form it now uses getByLabelText(/category/i).
+
+Tests: 159 API (unchanged) + 166 client (was 152; +7 MovementForm, +7 Dashboard) = 325, all green.
+Both tsc builds clean; vite production build clean.
+
+Remaining backlog (passes: false): #5 OCR card detection during extract, #6 payment method column
+in the import review table (depends on #5), #7 second-pass category suggestion, #8 editable AI
+category field (depends on #7), #9 clean description extraction + store context, #10 locale-aware
+amount separator parsing.
+prd.json updated: feature 4 ('Add payment method to the movement form and dashboard') passes → true.
+
+--- 2026-06-10 ---
+Feature completed: Detect the card used from receipt text during OCR extraction (backlog #5)
+
+Selected as highest priority: it is the documented next backlog item and the sole blocker for #6
+(the import review table column). Verified first that nothing existed — grep for paymentMethodId /
+detectedPaymentLabel / detectedBrand / paymentAiSuggested across api/ and client/ found only the
+unrelated dashboard paymentMethodBreakdown fields.
+
+TDD: wrote api/src/__tests__/import-payment-detection.test.ts first (10 tests, 9 red), then
+implemented. All changes are in api/src/routes/import.ts — API-only feature, no client changes.
+
+Changes (POST /api/import/extract):
+- Fetches all payment_methods (id, name, kind, brand, variant) before the AI call and embeds them
+  in the extraction prompt as a JSON list.
+- Prompt now asks for four extra per-movement fields: paymentMethodId (registered match),
+  detectedPaymentLabel / detectedBrand / detectedVariant (card mentioned but unregistered), with
+  explicit matching rules: match on brand + variant even when the registered name differs; all four
+  null when there is no payment signal. Bilingual cues included (tarjeta, compra, débito, crédito,
+  efectivo + English equivalents).
+- Server-side defense: paymentMethodId is looked up in a Map of registered ids and nulled out when
+  unknown (hallucination guard); normalizeBrand() maps free-text brands to the canonical enum
+  (visa | mastercard | amex | other — e.g. 'VISA' → visa, 'Master Card' → mastercard, 'American
+  Express' → amex, 'Diners Club' → other), null/empty stays null.
+- Each movement in the extract response now carries paymentMethodId, paymentMethodName,
+  detectedPaymentLabel, detectedBrand, detectedVariant, paymentAiSuggested (true only when a
+  registered method was matched and validated). When a valid id is matched, detected* fields are
+  forced to null even if the model also filled them. Nothing is persisted at extract time
+  (verified by test); persistence stays in /confirm, which already accepts payment_method_id.
+
+Tests: 169 API (was 159; +10 in import-payment-detection.test.ts) + 166 client = 335 total, all
+green. api tsc build, client tsc --noEmit, and vite production build all clean.
+
+Notes for the next person:
+- Backlog #6 (payment method column in the import review UI) is now unblocked. The client's
+  client/src/api/import.ts ExtractedMovement type does NOT yet include the new payment fields —
+  add them there when building #6.
+- Reminder from #2 still applies: run API tests with `npm test` (jest --runInBand), never bare
+  parallel jest — suites share the test-pg Docker DB on :5433.
+- The extract prompt change is backward-compatible: when the model omits the new fields entirely
+  (old-style response), every payment field comes back null / false.
+- prd.json updated: feature 5 ('Detect the card used from receipt text during OCR extraction')
+  passes → true.
+
+--- 2026-06-11 ---
+Code review fixes (post-iteration review of the full KAN-9 branch)
+
+A 7-angle review of the iteration diff surfaced 10 findings; the three correctness ones are
+fixed here, the rest (efficiency/cleanup: N+1 validation queries in /confirm, full-table scans
+in buildOcrStoreContextLines, forbidden-vocab list duplicated in the extract prompt vs
+descriptionSanitizer, mutual-exclusion rule repeated across three routes, kindIcon duplicate
+in PaymentMethods.tsx, un-unref'd race timers, unused parseAmount localeHint) are logged for a
+future pass.
+
+1. Stale-suggestion race (client): a debounced suggestCategory response arriving after the user
+   switched to the new-category text input could overwrite category state behind it.
+   - MovementForm.tsx: newCategoryModeRef mirrors newCategoryMode; the suggest callback bails
+     when the ref is set.
+   - Import.tsx: scheduleRowSuggest now applies results via a functional setRows that skips
+     rows whose cell is in text mode (newCategoryName !== null); branch 1 no longer force-nulls
+     newCategoryName.
+
+2. Untrusted model JSON (api): POST /api/import/extract now runs every raw movement through
+   normalizeRawMovement() — amount must be a positive finite number or is recovered via
+   parseAmount(rawAmountText / stringified amount) and the row flagged amountSuspect
+   (amountRecovered); unrecoverable rows are dropped; malformed dates fall back to today;
+   non-string description/store/detected* and non-numeric paymentMethodId are nulled. ISO_DATE
+   moved to module top. Previously a string amount flowed through NaN comparisons to the client.
+
+3. Silent register-card failure (client): handleRegisterCard in Import.tsx now surfaces the
+   server's { error } message (axios.isAxiosError) or a generic fallback in a per-row
+   registerError rendered under the 'Register this card?' button (data-testid
+   register-card-error); cleared on retry and on success.
+
+Also: .gitignore now excludes *.tsbuildinfo and the accidentally-emitted client/vite.config.js
++ .d.ts build artifacts.
+
+Tests: 257 API (was 248; +9 in import-extract-validation.test.ts) + 199 client (was 195;
++1 MovementForm race, +1 Import race, +2 register-card errors) = 456 total, all green. Both tsc
+builds clean. The MovementForm race test was verified red against the unguarded code.
+
+Gotcha for the next person: the two client race tests use the established fake-timer idiom
+(advanceTimersByTime(400) + double Promise.resolve flush). The Import race test discriminates
+against the original updateRow implementation (which set newCategoryName: null), not against
+merely deleting the text-mode guard — the fix there is the guard plus not force-nulling
+newCategoryName in the categoryId branch.

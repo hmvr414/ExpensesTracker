@@ -1,13 +1,50 @@
 import { NavLink } from 'react-router-dom';
+import { useEffect, useState } from 'react';
+import {
+  GMAIL_PENDING_REFRESH_EVENT,
+  getGmailPendingCount,
+} from '../api/gmail';
 
 const links = [
   { to: '/', label: 'Dashboard' },
   { to: '/import', label: 'Import from Image' },
   { to: '/categories', label: 'Categories' },
   { to: '/payment-methods', label: 'Payment Methods' },
+  { to: '/settings/gmail', label: 'Gmail' },
 ] as const;
 
 export function Nav() {
+  const [pendingMovements, setPendingMovements] = useState(0);
+
+  useEffect(() => {
+    const baseTitle = document.title.replace(/^\(\d+\)\s*/, '');
+    let mounted = true;
+
+    async function loadCount() {
+      try {
+        const count = await getGmailPendingCount();
+        if (!mounted) return;
+        setPendingMovements(count.movements);
+        document.title = count.movements > 0 ? `(${count.movements}) ${baseTitle}` : baseTitle;
+      } catch {
+        if (mounted) {
+          setPendingMovements(0);
+          document.title = baseTitle;
+        }
+      }
+    }
+
+    void loadCount();
+    const interval = window.setInterval(loadCount, 5 * 60 * 1000);
+    window.addEventListener(GMAIL_PENDING_REFRESH_EVENT, loadCount);
+    return () => {
+      mounted = false;
+      window.clearInterval(interval);
+      window.removeEventListener(GMAIL_PENDING_REFRESH_EVENT, loadCount);
+      document.title = baseTitle;
+    };
+  }, []);
+
   return (
     <aside className="w-56 bg-primary-950 flex flex-col flex-shrink-0 select-none">
       <div className="px-5 py-5 border-b border-primary-800/70">
@@ -44,7 +81,15 @@ export function Nav() {
               ].join(' ')
             }
           >
-            {label}
+            <span className="flex-1">{label}</span>
+            {to === '/import' && pendingMovements > 0 && (
+              <span
+                aria-label={`${pendingMovements} pending movements`}
+                className="min-w-5 rounded-full bg-warning-500 px-1.5 py-0.5 text-center text-xs font-semibold text-primary-950"
+              >
+                {pendingMovements}
+              </span>
+            )}
           </NavLink>
         ))}
       </nav>

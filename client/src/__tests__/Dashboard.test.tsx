@@ -57,6 +57,7 @@ const mockMovements = {
       id: 1,
       amount: '50.00',
       date: '2026-06-01',
+      time: '14:32',
       description: 'Groceries',
       store: 'Walmart',
       category_id: 1,
@@ -205,6 +206,15 @@ describe('Dashboard', () => {
       // 'Walmart' appears both in movements list and possibly top store card
       expect(screen.getAllByText('Walmart').length).toBeGreaterThan(0);
       expect(screen.getByText(/50\.00/)).toBeInTheDocument();
+    });
+  });
+
+  it('shows movement time beside the date when present', async () => {
+    vi.mocked(dashboardApi.getDashboard).mockResolvedValue(mockDashboard);
+    vi.mocked(movementsApi.getMovements).mockResolvedValue(mockMovements);
+    renderDashboard();
+    await waitFor(() => {
+      expect(screen.getByText('14:32')).toBeInTheDocument();
     });
   });
 

@@ -52,6 +52,7 @@ const upload = multer({
 });
 
 const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/;
+const DATE_ISO_BARE = `to_char(date, 'YYYY-MM-DD') AS date`;
 
 const router = Router();
 
@@ -342,7 +343,7 @@ router.post('/confirm', async (req: Request, res: Response) => {
       const result = await client.query<(typeof created)[number]>(
         `INSERT INTO movements (amount, date, time, description, store, category_id, payment_method_id, created_at, updated_at)
          VALUES ($1, $2, $3, $4, $5, $6, $7, NOW(), NOW())
-         RETURNING id, amount, date, description, store, category_id, payment_method_id`,
+         RETURNING id, amount, ${DATE_ISO_BARE}, description, store, category_id, payment_method_id`,
         [mv.amount, mv.date, normalizeTime(mv.time), mv.description ?? null, mv.store ?? null, categoryId, mv.payment_method_id ?? null]
       );
       const createdMovement = result.rows[0];

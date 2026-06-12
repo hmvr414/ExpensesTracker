@@ -271,6 +271,39 @@ describe('Import page', () => {
       expect(boxes[25]).toBeDisabled();
     });
 
+    it('selects visible eligible Gmail messages and skips imported rows', async () => {
+      renderImport();
+      await userEvent.click(screen.getByRole('tab', { name: /from gmail/i }));
+      await screen.findAllByText('Alerta de compra');
+      await userEvent.click(screen.getByRole('button', { name: /select visible/i }));
+
+      expect(screen.getByText('1 / 25 selected')).toBeInTheDocument();
+      expect(screen.getByRole('checkbox', { name: /select email gmail-1/i })).toBeChecked();
+      expect(screen.getByRole('checkbox', { name: /select email gmail-2/i })).not.toBeChecked();
+
+      await userEvent.click(screen.getByRole('button', { name: /clear/i }));
+      expect(screen.getByText('0 / 25 selected')).toBeInTheDocument();
+      expect(screen.getByRole('checkbox', { name: /select email gmail-1/i })).not.toBeChecked();
+    });
+
+    it('select visible respects the 25 email cap', async () => {
+      const manyMessages = Array.from({ length: 26 }, (_, index) => ({
+        ...mockMessages[0],
+        id: `gmail-${index + 1}`,
+        threadId: `thread-${index + 1}`,
+        snippet: `Message ${index + 1}`,
+      }));
+      vi.mocked(gmailApi.getGmailMessages).mockResolvedValue({ messages: manyMessages, nextPageToken: null });
+
+      renderImport();
+      await userEvent.click(screen.getByRole('tab', { name: /from gmail/i }));
+      await screen.findAllByRole('checkbox', { name: /select email/i });
+      await userEvent.click(screen.getByRole('button', { name: /select visible/i }));
+
+      expect(screen.getByText('25 / 25 selected')).toBeInTheDocument();
+      expect(screen.getByRole('checkbox', { name: /select email gmail-26/i })).toBeDisabled();
+    });
+
     it('extracts selected emails and feeds movements into the existing review table', async () => {
       renderImport();
       await userEvent.click(screen.getByRole('tab', { name: /from gmail/i }));

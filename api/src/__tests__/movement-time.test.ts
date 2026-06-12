@@ -159,6 +159,7 @@ describe('movement time field', () => {
     it('GET /api/movements/:id returns HH:MM', async () => {
       const res = await request(getApp()).get(`/api/movements/${timedId}`);
       expect(res.status).toBe(200);
+      expect(res.body.date).toBe('2024-05-03');
       expect(res.body.time).toBe('13:30');
     });
 
@@ -172,6 +173,8 @@ describe('movement time field', () => {
       const res = await request(getApp()).get('/api/movements?search=__test_time_get_');
       expect(res.status).toBe(200);
       const byId = new Map(res.body.data.map((m: { id: number; time: string | null }) => [m.id, m.time]));
+      const datesById = new Map(res.body.data.map((m: { id: number; date: string }) => [m.id, m.date]));
+      expect(datesById.get(timedId)).toBe('2024-05-03');
       expect(byId.get(timedId)).toBe('13:30');
       expect(byId.get(untimedId)).toBeNull();
     });

@@ -57,8 +57,10 @@ const PAYMENT_METHOD_JSON = `
                               'brand', pm.brand, 'variant', pm.variant)
   END AS payment_method`;
 
-// Appended after a wildcard select so the alias overrides the raw
-// HH:MM:SS column value — the API always exposes time as HH:MM.
+// Appended after a wildcard select so the aliases override raw pg date/time
+// serialization. The API exposes date as YYYY-MM-DD and time as HH:MM.
+const DATE_ISO = `to_char(m.date, 'YYYY-MM-DD') AS date`;
+const DATE_ISO_BARE = `to_char(date, 'YYYY-MM-DD') AS date`;
 const TIME_HHMM = `to_char(m.time, 'HH24:MI') AS time`;
 const TIME_HHMM_BARE = `to_char(time, 'HH24:MI') AS time`;
 
@@ -101,7 +103,7 @@ router.get('/', async (req: Request, res: Response) => {
   const offsetIdx = params.push(offset);
 
   const result = await db.query(
-    `SELECT m.*, ${TIME_HHMM},
+    `SELECT m.*, ${DATE_ISO}, ${TIME_HHMM},
             c.name AS category_name, c.color AS category_color,
             ${PAYMENT_METHOD_JSON},
             COALESCE(json_agg(a ORDER BY a.created_at) FILTER (WHERE a.id IS NOT NULL), '[]') AS attachments
@@ -123,7 +125,7 @@ router.get('/:id', async (req: Request, res: Response) => {
   const id = parseInt(req.params.id, 10);
 
   const result = await db.query(
-    `SELECT m.*, ${TIME_HHMM},
+    `SELECT m.*, ${DATE_ISO}, ${TIME_HHMM},
             c.name AS category_name, c.color AS category_color,
             ${PAYMENT_METHOD_JSON},
             COALESCE(json_agg(a ORDER BY a.created_at) FILTER (WHERE a.id IS NOT NULL), '[]') AS attachments
@@ -181,7 +183,7 @@ router.post('/', async (req: Request, res: Response) => {
       const result = await client.query(
         `INSERT INTO movements (amount, date, time, description, store, category_id, payment_method_id)
          VALUES ($1, $2, $3, $4, $5, $6, $7)
-         RETURNING *, ${TIME_HHMM_BARE}`,
+         RETURNING *, ${DATE_ISO_BARE}, ${TIME_HHMM_BARE}`,
         [amount, dateValue, timeValue, description ?? null, store ?? null, resolved.id, payment_method_id ?? null]
       );
       await client.query('COMMIT');
@@ -198,7 +200,7 @@ router.post('/', async (req: Request, res: Response) => {
   const result = await db.query(
     `INSERT INTO movements (amount, date, time, description, store, category_id, payment_method_id)
      VALUES ($1, $2, $3, $4, $5, $6, $7)
-     RETURNING *, ${TIME_HHMM_BARE}`,
+     RETURNING *, ${DATE_ISO_BARE}, ${TIME_HHMM_BARE}`,
     [amount, dateValue, timeValue, description ?? null, store ?? null, category_id ?? null, payment_method_id ?? null]
   );
 
@@ -260,7 +262,7 @@ router.put('/:id', async (req: Request, res: Response) => {
       sets.push('updated_at = now()');
       values.push(id);
       const result = await client.query(
-        `UPDATE movements SET ${sets.join(', ')} WHERE id = $${values.length} RETURNING *, ${TIME_HHMM_BARE}`,
+        `UPDATE movements SET ${sets.join(', ')} WHERE id = $${values.length} RETURNING *, ${DATE_ISO_BARE}, ${TIME_HHMM_BARE}`,
         values
       );
       await client.query('COMMIT');
@@ -277,14 +279,14 @@ router.put('/:id', async (req: Request, res: Response) => {
   sets.push('updated_at = now()');
 
   if (sets.length === 1) {
-    const row = await db.query(`SELECT *, ${TIME_HHMM_BARE} FROM movements WHERE id = $1`, [id]);
+    const row = await db.query(`SELECT *, ${DATE_ISO_BARE}, ${TIME_HHMM_BARE} FROM movements WHERE id = $1`, [id]);
     res.json(row.rows[0]);
     return;
   }
 
   values.push(id);
   const result = await db.query(
-    `UPDATE movements SET ${sets.join(', ')} WHERE id = $${values.length} RETURNING *, ${TIME_HHMM_BARE}`,
+    `UPDATE movements SET ${sets.join(', ')} WHERE id = $${values.length} RETURNING *, ${DATE_ISO_BARE}, ${TIME_HHMM_BARE}`,
     values
   );
 

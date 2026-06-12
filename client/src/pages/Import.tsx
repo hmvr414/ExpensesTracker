@@ -733,6 +733,21 @@ export function Import() {
     });
   }
 
+  function selectVisibleGmailMessages() {
+    setGmailSelected((prev) => {
+      const next = new Set(prev);
+      for (const message of gmailMessages) {
+        if (next.size >= 25) break;
+        if (!message.alreadyImported) next.add(message.id);
+      }
+      return next;
+    });
+  }
+
+  function clearGmailSelection() {
+    setGmailSelected(new Set());
+  }
+
   async function handleExtractEmails(messageIds?: string[]) {
     const ids = messageIds ?? Array.from(gmailSelected);
     if (ids.length === 0) return;
@@ -1427,8 +1442,30 @@ export function Import() {
 
                 {renderGmailEmailErrors()}
 
-                <div className="mt-4 flex items-center justify-between">
-                  <span className="text-sm text-neutral-500">{selectedCount} / 25 selected</span>
+                <div className="mt-4 flex flex-wrap items-center justify-between gap-3">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <span className="text-sm text-neutral-500">{selectedCount} / 25 selected</span>
+                    <button
+                      type="button"
+                      onClick={selectVisibleGmailMessages}
+                      disabled={
+                        gmailMessagesLoading ||
+                        selectedCount >= 25 ||
+                        !gmailMessages.some((message) => !message.alreadyImported && !gmailSelected.has(message.id))
+                      }
+                      className="rounded border border-neutral-200 px-3 py-1.5 text-sm text-neutral-700 hover:bg-neutral-100 disabled:cursor-not-allowed disabled:opacity-50 dark:border-neutral-700 dark:text-neutral-300 dark:hover:bg-neutral-800"
+                    >
+                      Select visible
+                    </button>
+                    <button
+                      type="button"
+                      onClick={clearGmailSelection}
+                      disabled={selectedCount === 0}
+                      className="rounded border border-neutral-200 px-3 py-1.5 text-sm text-neutral-700 hover:bg-neutral-100 disabled:cursor-not-allowed disabled:opacity-50 dark:border-neutral-700 dark:text-neutral-300 dark:hover:bg-neutral-800"
+                    >
+                      Clear
+                    </button>
+                  </div>
                   <button
                     type="button"
                     onClick={() => handleExtractEmails()}

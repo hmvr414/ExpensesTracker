@@ -5,6 +5,8 @@ services:
     command: npx nodemon
     environment:
       NODE_ENV: development
+    ports:
+      - "3000:3000"
     volumes:
       - ./api/src:/app/src
       - ./api/migrations:/app/migrations

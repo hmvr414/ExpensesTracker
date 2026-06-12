@@ -62,7 +62,9 @@ function formatCurrency(amount: number) {
 }
 
 function formatDate(dateStr: string) {
-  const d = new Date(dateStr + 'T00:00:00');
+  const dateOnly = dateStr.includes('T') ? dateStr.slice(0, 10) : dateStr;
+  const d = new Date(dateOnly + 'T00:00:00');
+  if (Number.isNaN(d.getTime())) return dateStr;
   return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
 }
 

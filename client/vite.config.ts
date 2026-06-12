@@ -20,5 +20,13 @@ export default defineConfig({
     environment: 'jsdom',
     globals: true,
     setupFiles: './src/test-setup.ts',
+    // Cap test parallelism: a worker per core OOMs the 16 GB dev machine when
+    // test runs overlap with the rest of the dev workstation stack.
+    poolOptions: {
+      threads: {
+        minThreads: 1,
+        maxThreads: 2,
+      },
+    },
   },
 });

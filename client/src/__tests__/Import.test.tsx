@@ -528,6 +528,33 @@ describe('Import page', () => {
       expect(screen.getByRole('combobox', { name: 'Category' })).toBeInTheDocument();
     });
 
+    it('lets the user type a new category when no suggestion fits and sends it on confirm', async () => {
+      vi.mocked(importApi.confirmImport).mockResolvedValue(mockConfirmResponse);
+      await goToReviewWith([
+        {
+          ...mockExtractResponse.movements[0],
+          categoryId: null,
+          categoryName: null,
+          color: null,
+          aiSuggested: false,
+          suggestedNewCategory: null,
+        },
+      ]);
+
+      fireEvent.click(screen.getByTestId('manual-new-category-button'));
+      const input = screen.getByTestId('new-category-input');
+      expect(input).toHaveValue('');
+      await userEvent.type(input, 'AI Services');
+      fireEvent.click(screen.getByTestId('import-button'));
+
+      await waitFor(() => {
+        expect(importApi.confirmImport).toHaveBeenCalled();
+      });
+      const payload = vi.mocked(importApi.confirmImport).mock.calls[0][0];
+      expect(payload.movements[0].new_category_name).toBe('AI Services');
+      expect(payload.movements[0].category_id).toBeUndefined();
+    });
+
     it('clears the AI suggested badge when the suggested name is edited', async () => {
       await goToReviewWith([suggestionMovement]);
       fireEvent.change(screen.getByTestId('new-category-input'), {

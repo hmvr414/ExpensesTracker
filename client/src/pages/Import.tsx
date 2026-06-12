@@ -121,6 +121,7 @@ interface ReviewRowProps {
   onDescriptionChange: (val: string) => void;
   onStoreChange: (val: string) => void;
   onCategoryChange: (id: number | null, name: string | null, color: string | null) => void;
+  onUseNewCategory: () => void;
   onNewCategoryNameChange: (val: string) => void;
   onRevertToSelect: () => void;
   onPaymentMethodChange: (id: number | null) => void;
@@ -137,6 +138,7 @@ function ReviewRowComponent({
   onDescriptionChange,
   onStoreChange,
   onCategoryChange,
+  onUseNewCategory,
   onNewCategoryNameChange,
   onRevertToSelect,
   onPaymentMethodChange,
@@ -249,6 +251,16 @@ function ReviewRowComponent({
               </option>
             ))}
           </select>
+          <button
+            type="button"
+            onClick={onUseNewCategory}
+            aria-label="Type a new category"
+            title="Type a new category"
+            data-testid="manual-new-category-button"
+            className="text-xs text-primary-600 hover:text-primary-700 font-medium whitespace-nowrap"
+          >
+            + New
+          </button>
           {row.suggestLoading && (
             <span
               className="w-4 h-4 border-2 border-primary-500 border-t-transparent rounded-full animate-spin"
@@ -723,6 +735,15 @@ export function Import() {
                     onStoreChange={(val) => handleRowStoreChange(row._key, val)}
                     onCategoryChange={(id, name, color) =>
                       updateRow(row._key, { categoryId: id, categoryName: name, color, aiSuggested: false })
+                    }
+                    onUseNewCategory={() =>
+                      updateRow(row._key, {
+                        categoryId: null,
+                        categoryName: null,
+                        color: null,
+                        newCategoryName: '',
+                        aiSuggested: false,
+                      })
                     }
                     onNewCategoryNameChange={(val) => handleRowNewCategoryNameChange(row._key, val)}
                     onRevertToSelect={() =>

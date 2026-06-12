@@ -175,6 +175,28 @@ describe('POST /api/suggest/category', () => {
     expect(res.body).toHaveProperty('categoryId');
   });
 
+  it('uses deterministic keywords for clear parking expenses', async () => {
+    const transport = await pool.query<{ id: number; color: string }>(
+      `SELECT id, color FROM categories WHERE name = 'Transport' LIMIT 1`
+    );
+
+    const res = await request(app)
+      .post('/api/suggest/category')
+      .send({
+        store: 'Titan Plaza Parking',
+        description: 'Titan Plaza Bicycle Parking',
+      });
+
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({
+      categoryId: transport.rows[0].id,
+      categoryName: 'Transport',
+      color: transport.rows[0].color,
+      suggestedNewCategory: null,
+    });
+    expect(mockCreate).not.toHaveBeenCalled();
+  });
+
   it('returns { categoryId: null } when AI returns an unknown categoryId', async () => {
     mockCreate.mockResolvedValue({
       choices: [

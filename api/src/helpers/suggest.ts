@@ -17,6 +17,52 @@ export interface SuggestResult {
 
 const TIMEOUT_MS = 3000;
 
+const KEYWORD_CATEGORY_RULES: Array<{
+  patterns: RegExp[];
+  categoryNames: string[];
+}> = [
+  {
+    patterns: [
+      /\b(parking|parqueadero|estacionamiento|bicycle parking|bike parking)\b/i,
+      /\b(taxi|uber|cabify|bus|metro|transmilenio|gasolina|fuel)\b/i,
+    ],
+    categoryNames: ['Transport'],
+  },
+  {
+    patterns: [
+      /\b(restaurant|restaurante|starbucks|coffee|cafe|cafeteria|burger|pizza)\b/i,
+      /\b(comida|almuerzo|cena|breakfast|lunch|dinner|takeout)\b/i,
+    ],
+    categoryNames: ['Dining Out', 'Food'],
+  },
+  {
+    patterns: [
+      /\b(gym|gimnasio|fitness|workout|sports|deporte|protein|water bottle)\b/i,
+    ],
+    categoryNames: ['Fitness', 'Health'],
+  },
+  {
+    patterns: [
+      /\b(pharmacy|farmacia|drugstore|medicine|medication|medicina|salud)\b/i,
+    ],
+    categoryNames: ['Health'],
+  },
+  {
+    patterns: [
+      /\b(openrouter|anthropic|aws|amazon web services|digitalocean|cloud|hosting)\b/i,
+      /\b(api credits|ai bill|ai bills|server|hardware|domain|dns|infra)\b/i,
+    ],
+    categoryNames: ['Tech Infrastructure'],
+  },
+  {
+    patterns: [
+      /\b(grocery|groceries|supermarket|mercado|verduras|fruit|vegetables)\b/i,
+      /\b(exito|carulla|jumbo|d1|ara)\b/i,
+    ],
+    categoryNames: ['Groceries', 'Groseries', 'Food'],
+  },
+];
+
 async function completeJson(
   client: OpenAI,
   model: string,
@@ -41,6 +87,44 @@ function sanitizeSuggestedName(raw: unknown): string | null {
   const trimmed = raw.trim();
   if (trimmed.length === 0 || trimmed.length > 40) return null;
   return trimmed;
+}
+
+function normalizeText(raw: string): string {
+  return raw
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase();
+}
+
+function toSuggestResult(category: Category): SuggestResult {
+  return {
+    categoryId: category.id,
+    categoryName: category.name,
+    ...(category.color != null ? { color: category.color } : {}),
+    suggestedNewCategory: null,
+  };
+}
+
+function findCategoryByNames(categories: Category[], names: string[]): Category | undefined {
+  const normalizedNames = names.map(normalizeText);
+  return categories.find(c => normalizedNames.includes(normalizeText(c.name)));
+}
+
+function suggestFromKeywords(
+  store: string | undefined,
+  description: string | undefined,
+  categories: Category[]
+): SuggestResult | null {
+  const text = normalizeText(`${store ?? ''} ${description ?? ''}`);
+  if (text.trim() === '') return null;
+
+  for (const rule of KEYWORD_CATEGORY_RULES) {
+    if (!rule.patterns.some(pattern => pattern.test(text))) continue;
+    const category = findCategoryByNames(categories, rule.categoryNames);
+    if (category) return toSuggestResult(category);
+  }
+
+  return null;
 }
 
 // Store knowledge shared by both passes: a cached web summary of what the
@@ -108,6 +192,9 @@ export async function suggestCategory(
     'SELECT id, name, color FROM categories ORDER BY name ASC'
   );
   const categories = categoriesResult.rows;
+
+  const keywordSuggestion = suggestFromKeywords(store, description, categories);
+  if (keywordSuggestion) return keywordSuggestion;
 
   // Both never throw; getStoreContext web-searches a store at most once ever.
   const [priorDescriptions, storeContext] = await Promise.all([

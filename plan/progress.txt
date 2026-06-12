@@ -33,3 +33,77 @@ Import expense movements directly from bank notification emails (e.g. DAVIbank p
 11. Pending imports inbox and notification badge
 
 ---
+
+### 2026-06-12 — Sender filters and candidate email listing API
+- Selected the highest-priority incomplete feature after Gmail OAuth: sender filters and candidate Gmail message listing.
+- Implemented `api/src/routes/gmail.ts` sender CRUD (`GET/POST/PUT/DELETE /api/gmail/senders`) with zod validation, lowercased unique emails, 409 duplicate handling, partial updates, and hard delete.
+- Implemented `GET /api/gmail/messages`: configured/adhoc sender selection, Gmail server-side query construction with sender OR groups, per-sender `subject_contains`, ad-hoc subject phrase, date bounds, page token passthrough, metadata fetches, `alreadyImported` annotation from `gmail_imported_messages`, and reconnect-required mapping for local/Google auth failures.
+- Verification: `api npm run build` passed; `client npm run build` passed. In disposable Docker test runs against `expenses_test`, `gmail-messages.test.ts` passed, `gmail-senders.test.ts` passed 16/17 in full-suite form with one slow DB-seed timeout, and the timed-out ordering test passed when rerun in isolation (`returns all senders ordered by email`). Combined focused run passed 30/33 before container slowness in sender tests.
+
+### 2026-06-12 — Shared text-extraction core and email body extraction endpoint
+- Selected the highest-priority incomplete feature after sender/message listing: shared extraction plus Gmail email body extraction.
+- Moved the OCR extraction pipeline into `api/src/helpers/extractMovements.ts` (`extractMovementsFromText`): prompt construction, OpenRouter call, defensive normalization, category suggestion cache, description sanitizer, payment-method matching/fallback fields, store-context prompt enrichment, and deterministic amount reconciliation.
+- Updated `POST /api/import/extract` to call the shared helper without changing its response shape, then added `POST /api/import/extract-emails` with zod validation for 1–25 unique message ids, full Gmail message fetch, text/plain preference, HTML-only sanitization fallback, Subject/From/Date context prepending, per-email error isolation, and `gmailMessageId`/`source: "gmail"` tagging.
+- Added `api/src/__tests__/import-extract-emails.test.ts` covering plain-text bodies, HTML-only bodies, batch isolation, payment fallback fields through the shared pipeline, validation, and Gmail message fetch shape.
+- Verification: `api npm run build` passed; `client npm run build` passed; `client npm test` passed (200 tests). Dockerized Jest against `expenses_test` passed for `import-extract-emails.test.ts` (5 tests), `import.test.ts` (22 tests, with `--testTimeout=60000` due slow container setup), and `import-payment-detection.test.ts` (10 tests, with `--testTimeout=60000`). Jest still reports the existing open-handle warning after these runs, but exits code 0.
+
+### 2026-06-12 — Import confirmation with Gmail deduplication
+- Selected the highest-priority incomplete feature after email body extraction: confirm-time Gmail deduplication.
+- Extended `POST /api/import/confirm` to accept optional `gmail_message_id` per movement, preflight those ids against `gmail_imported_messages`, and return 409 `{ error, details: { alreadyImported } }` without persisting when a prior confirm already imported any id.
+- Wrote `gmail_imported_messages` rows inside the existing bulk-insert transaction, one row per created Gmail-sourced movement; multiple movements from the same email are allowed in a single batch, and OCR confirms without `gmail_message_id` are unchanged.
+- Confirmed movement deletion leaves imported-message rows with `movement_id = NULL` via the existing `ON DELETE SET NULL`, so Gmail listing continues to treat the email as ever imported.
+- Added focused API tests in `api/src/__tests__/import.test.ts` for log insertion, rollback with invalid batch items, re-confirm 409, multi-movement same-email batches, deletion preserving the imported mark, and unchanged confirm validation/creation behavior.
+- Verification: `api npm run build` passed; `client npm run build` passed. Updated confirm tests passed in a disposable Docker run on the compose network with local `src` mounted: `import.test.ts` confirm suite 16/16 passed (11 extract tests skipped by the focused pattern). Jest still reports the existing open-handle warning after completion.
+
+### 2026-06-12 — Gmail connection settings screen
+- Selected the highest-priority remaining incomplete feature: the Gmail connection settings UI.
+- Added `client/src/api/gmail.ts` for Gmail status/auth/disconnect and sender CRUD calls with structured Gmail API errors.
+- Added `/settings/gmail` and a persistent nav link. The page renders connected/disconnected states, OAuth success/error return handling with URL cleanup, disconnect confirmation, reconnect-required banner, and sender filter management with add/edit/delete, client-side email validation, duplicate-email error handling, subject-filter chips, and the zero-sender prompt.
+- Added client tests in `client/src/__tests__/GmailSettings.test.tsx` plus route/nav/API coverage for the new screen and client module.
+- Verification: `client npm test` passed (214 tests); `client npm run build` passed; `api npm run build` passed. A local `api npm test` run failed because no Postgres was listening on `localhost:5433`; `docker compose exec` was blocked by the missing project `.env`, and direct `docker exec` could not load Jest config through the current container mounts, so no API Jest suite was completed in this environment.
+
+### 2026-06-12 — Gmail email picker in the import flow
+- Selected the highest-priority remaining incomplete feature: the Gmail email picker in the import flow.
+- Converted the import start screen into source tabs while preserving the existing upload path as the default. The Gmail tab now checks connection and sender configuration, shows CTAs to `/settings/gmail` for missing setup, and lists Gmail messages from `GET /api/gmail/messages`.
+- Added date presets/custom range, sender filtering, debounced subject search, imported-message badges with disabled checkboxes, load-more pagination, 25-email selection cap, and an extract action wired to `POST /api/import/extract-emails`.
+- Email extraction now hands successful movements into the existing review table; per-email extraction errors render inline with a retry action that re-extracts only the failed message and merges successful movements into review.
+- Added client API wrappers and tests for Gmail messages and email extraction, plus Import page tests covering guards, imported disabling, selection cap, pagination, extraction payload, and single-email retry.
+- Verification: `client npm test` passed (225 tests); `client npm run build` passed; `api npm run build` passed. A full local `api npm test` run failed because no Postgres was listening on `localhost:5433` (`ECONNREFUSED` across DB-backed suites), matching the prior environment limitation; no backend code was changed for this feature.
+
+### 2026-06-12 — Time-of-day field on movements
+- Selected the highest-priority remaining incomplete feature: the movement time-of-day field.
+- Confirmed the backend migration/helper/route work and `movement-time.test.ts` coverage were already present, then completed the missing client side: `Movement` API types now carry optional `time`, `MovementForm` has a native optional time input beside date, create/update payloads submit `HH:MM` or explicit `null`, edit mode pre-populates and can clear time, and Dashboard Recent Movements renders `HH:MM` below the date when present.
+- Added client TDD coverage in `MovementForm.test.tsx` for time input rendering, create payload, empty/null submit, edit prefill, and clearing; added `Dashboard.test.tsx` coverage for recent movement time display.
+- Verification: focused client tests passed (`MovementForm.test.tsx` 39 tests, `Dashboard.test.tsx` 21 tests); full `client npm test` passed (235 tests); `client npm run build` passed; `api npm run build` passed. Focused backend `movement-time.test.ts` could not run locally because `node-pg-migrate` could not connect to Postgres on `localhost:5433` (`ECONNREFUSED`); Docker was also unavailable in this environment.
+
+### 2026-06-12 — Review and confirm Gmail-extracted movements
+- Selected the highest-priority incomplete feature that still had a behavior gap: Gmail review/confirm. The PRD already had `passes: true` for this feature, so no PRD field was changed.
+- Confirmed most requirements were already implemented: Gmail rows carry `gmailMessageId`, the Source column is hidden for upload imports and shown for Gmail imports, confirm payloads include `gmail_message_id`, 409 conflicts mark rows as Already imported, zero-movement Gmail extracts show a back-to-list empty state, and success summaries mark imported email counts.
+- Fixed the remaining mixed-result flow: when selected emails return both successful movements and per-email errors, the app now moves straight to the review table, shows the retryable email error above the rows, and retrying the failed email appends its movements without disturbing the already-extracted rows.
+- Verification: TDD regression initially failed, then passed after the fix (`Import.test.tsx` focused mixed-error test); full `Import.test.tsx` passed (62 tests); full client test suite passed (235 tests); `client npm run build` passed; `api npm run build` passed. Full `api npm test` could not pass in this environment because Postgres on `localhost:5433` is unavailable and Docker is not reachable; it failed uniformly with `ECONNREFUSED` during migrations.
+
+### 2026-06-12 — Extract time during import and flag possible duplicate movements
+- Selected the highest-priority remaining incomplete feature: extraction-time movement times plus soft duplicate warnings.
+- Extended the shared extraction prompt/output normalization with optional `time`, including 24-hour and Spanish/English 12-hour formats (`14:32`, `2:32 PM`, `02:32 p. m.`); malformed extracted times are normalized to `null` without rejecting the movement.
+- Added duplicate annotation after OCR/Gmail extraction: same normalized store, amount, and date is marked `possibleDuplicate` with `duplicateOf`; when both sides have non-null differing times, the warning is suppressed. The same logic flags later duplicates within one extraction batch.
+- Added the review-table Time column, editable native time inputs, confirm payload `time`, and a non-blocking “Possible duplicate” badge with a tooltip pointing to the matched movement or batch row.
+- Added API regressions in `import.test.ts` for time normalization, existing duplicate detection/suppression, and within-batch duplicate warnings; added client regressions in `Import.test.tsx` for editable extracted times, confirm payloads, and non-blocking duplicate badges.
+- Verification: focused `Import.test.tsx` passed (64 tests); full `client npm test` passed (237 tests); `client npm run build` passed; `api npm run build` passed. Focused API Jest could not run because `node-pg-migrate` could not connect to Postgres on `localhost:5433` (`ECONNREFUSED`), and Docker was not reachable in this environment.
+
+### 2026-06-12 — Background Gmail polling into a pending import queue
+- Selected the highest-priority remaining incomplete feature: backend Gmail polling and pending imports queue.
+- Added migration `011_create-gmail-pending-imports.js` for `gmail_pending_imports`, plus `last_polled_at` and `needs_reconnect` on `gmail_connection`.
+- Added `api/src/jobs/gmailPoller.ts`: disabled in tests, interval-driven in server startup, manual `runGmailPollTick()`, sender-filter Gmail search with a 1-day overlap, dedup against imported and pending message ids, per-message extraction into pending/error rows, `last_polled_at` updates after completed ticks, and reconnect suspension via `needs_reconnect`.
+- Added pending queue endpoints under `/api/gmail`: list/count, dismiss, retry errored messages, and `poll-now`; confirm now deletes matching pending rows in the same transaction that writes movements and `gmail_imported_messages`.
+- Shared Gmail MIME/body extraction in `api/src/helpers/gmailMessageText.ts` so manual extraction and background polling use the same text/plain preference, HTML fallback, and Subject/From/Date context.
+- Added focused API regressions in `gmail-pending.test.ts` covering skip conditions, query construction/storage, dedup against imported/pending rows, error capture + retry, reconnect suspension, pending endpoints, poll-now, and confirm clearing the queue.
+- Verification: `api npm run build` passed; `client npm run build` passed. Focused API Jest could not run in this environment because `node-pg-migrate` could not connect to Postgres on `localhost:5433` (`ECONNREFUSED`), and Docker is not reachable (`Cannot connect to the Docker daemon`).
+
+### 2026-06-12 — Pending imports inbox and notification badge
+- Selected the highest-priority remaining incomplete feature: pending imports inbox and notification badge.
+- Added client Gmail pending-queue API helpers for list/count/dismiss/retry/poll-now plus a shared refresh event used by the app after pending mutations.
+- Added the nav pending-movement badge, 5-minute count refresh, event-driven count refresh, and browser title prefix when pending movements exist.
+- Added the /import Gmail pending-review section above the manual email browser: pending cards with movement summaries, selection and direct review handoff without re-extraction, dismiss with confirmation, error cards with retry, Check now, Last checked, reconnect-required guard, and badge refresh after confirm/dismiss.
+- Added the Gmail settings Last checked readout from `lastPolledAt`.
+- Added client regressions for API wrappers, nav badge/title refresh, pending cards, review handoff without extraction, dismiss/retry/check-now, and confirm-triggered badge refresh.
+- Verification: focused client tests passed (`Import.test.tsx`, `Nav.test.tsx`, `api.test.ts`: 102 tests); full `client npm test` passed (248 tests); `client npm run build` passed; `api npm run build` passed. Full `api npm test` was attempted but failed uniformly because `node-pg-migrate` cannot connect to Postgres on `localhost:5433` (`ECONNREFUSED`); unrelated DB-backed suites fail the same way, and 4 non-DB suites passed before the database failures dominated the run.

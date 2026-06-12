@@ -1,8 +1,29 @@
 import { useState, useRef, useEffect } from 'react';
 import axios from 'axios';
 import { Category, ResolvedCategory, getCategories } from '../api/categories';
-import { extractFromImage, confirmImport, ExtractedMovement, ConfirmResponse } from '../api/import';
+import {
+  extractFromImage,
+  extractFromEmails,
+  confirmImport,
+  ExtractEmailResult,
+  ExtractedMovement,
+  ConfirmResponse,
+} from '../api/import';
 import { suggestCategory } from '../api/suggest';
+import {
+  GmailApiError,
+  GmailMessage,
+  GmailPendingEmail,
+  GmailSender,
+  dismissGmailPending,
+  getGmailMessages,
+  getGmailPending,
+  getGmailSenders,
+  getGmailStatus,
+  pollGmailNow,
+  requestGmailPendingRefresh,
+  retryGmailPending,
+} from '../api/gmail';
 import {
   PaymentMethod,
   PaymentMethodBrand,
@@ -12,6 +33,8 @@ import {
 import { paymentMethodIcon } from '../helpers/paymentMethod';
 
 type Step = 'upload' | 'processing' | 'review' | 'confirm';
+type SourceTab = 'upload' | 'gmail';
+type GmailPreset = 'this-week' | 'this-month' | 'last-week' | 'last-month' | 'last-30-days' | 'custom';
 
 interface ReviewRow {
   _key: string;
@@ -21,8 +44,16 @@ interface ReviewRow {
   rawAmountText: string | null;
   amountSuspect: boolean;
   date: string;
+  time: string;
   description: string;
   store: string;
+  possibleDuplicate: boolean;
+  duplicateOf: {
+    id: number | null;
+    date: string;
+    time: string | null;
+    description: string | null;
+  } | null;
   categoryId: number | null;
   categoryName: string | null;
   color: string | null;
@@ -37,6 +68,13 @@ interface ReviewRow {
   detectedVariant: string | null;
   registering: boolean;
   registerError: string | null;
+  // Set for gmail-sourced rows: traceability column + dedup on confirm
+  gmailMessageId: string | null;
+  emailSubject: string | null;
+  emailFrom: string | null;
+  emailDate: string | null;
+  // Marked by a 409 confirm response; row is skipped on the next confirm
+  alreadyImported: boolean;
 }
 
 let keyCounter = 0;
@@ -44,7 +82,50 @@ function makeKey() {
   return String(++keyCounter);
 }
 
-function movementToRow(m: ExtractedMovement): ReviewRow {
+function toDateInputValue(date: Date) {
+  return date.toISOString().slice(0, 10);
+}
+
+function startOfWeek(date: Date) {
+  const copy = new Date(date);
+  const day = copy.getDay();
+  const diff = day === 0 ? -6 : 1 - day;
+  copy.setDate(copy.getDate() + diff);
+  return copy;
+}
+
+function dateRangeForPreset(preset: GmailPreset) {
+  const today = new Date();
+  const from = new Date(today);
+  const to = new Date(today);
+
+  if (preset === 'this-week') {
+    return { from: toDateInputValue(startOfWeek(today)), to: toDateInputValue(to) };
+  }
+  if (preset === 'this-month') {
+    return { from: toDateInputValue(new Date(today.getFullYear(), today.getMonth(), 1)), to: toDateInputValue(to) };
+  }
+  if (preset === 'last-week') {
+    const end = startOfWeek(today);
+    end.setDate(end.getDate() - 1);
+    const start = startOfWeek(end);
+    return { from: toDateInputValue(start), to: toDateInputValue(end) };
+  }
+  if (preset === 'last-month') {
+    return {
+      from: toDateInputValue(new Date(today.getFullYear(), today.getMonth() - 1, 1)),
+      to: toDateInputValue(new Date(today.getFullYear(), today.getMonth(), 0)),
+    };
+  }
+
+  from.setDate(from.getDate() - 29);
+  return { from: toDateInputValue(from), to: toDateInputValue(to) };
+}
+
+function movementToRow(
+  m: ExtractedMovement,
+  email?: Pick<ExtractEmailResult, 'messageId' | 'subject' | 'from' | 'date'>
+): ReviewRow {
   const suggestedNew = m.categoryId == null ? m.suggestedNewCategory ?? null : null;
   return {
     _key: makeKey(),
@@ -52,8 +133,11 @@ function movementToRow(m: ExtractedMovement): ReviewRow {
     rawAmountText: m.rawAmountText ?? null,
     amountSuspect: m.amountSuspect ?? false,
     date: m.date,
+    time: m.time ?? '',
     description: m.description ?? '',
     store: m.store ?? '',
+    possibleDuplicate: m.possibleDuplicate ?? false,
+    duplicateOf: m.duplicateOf ?? null,
     categoryId: m.categoryId,
     categoryName: m.categoryName ?? null,
     color: m.color ?? null,
@@ -67,6 +151,11 @@ function movementToRow(m: ExtractedMovement): ReviewRow {
     detectedVariant: m.detectedVariant ?? null,
     registering: false,
     registerError: null,
+    gmailMessageId: email?.messageId ?? m.gmailMessageId ?? null,
+    emailSubject: email?.subject ?? null,
+    emailFrom: email?.from ?? null,
+    emailDate: email?.date ?? null,
+    alreadyImported: false,
   };
 }
 
@@ -77,8 +166,11 @@ function emptyRow(): ReviewRow {
     rawAmountText: null,
     amountSuspect: false,
     date: new Date().toISOString().split('T')[0],
+    time: '',
     description: '',
     store: '',
+    possibleDuplicate: false,
+    duplicateOf: null,
     categoryId: null,
     categoryName: null,
     color: null,
@@ -92,6 +184,11 @@ function emptyRow(): ReviewRow {
     detectedVariant: null,
     registering: false,
     registerError: null,
+    gmailMessageId: null,
+    emailSubject: null,
+    emailFrom: null,
+    emailDate: null,
+    alreadyImported: false,
   };
 }
 
@@ -116,8 +213,10 @@ interface ReviewRowProps {
   row: ReviewRow;
   categories: Category[];
   paymentMethods: PaymentMethod[];
+  showSource: boolean;
   onAmountChange: (val: string) => void;
   onDateChange: (val: string) => void;
+  onTimeChange: (val: string) => void;
   onDescriptionChange: (val: string) => void;
   onStoreChange: (val: string) => void;
   onCategoryChange: (id: number | null, name: string | null, color: string | null) => void;
@@ -133,8 +232,10 @@ function ReviewRowComponent({
   row,
   categories,
   paymentMethods,
+  showSource,
   onAmountChange,
   onDateChange,
+  onTimeChange,
   onDescriptionChange,
   onStoreChange,
   onCategoryChange,
@@ -146,7 +247,11 @@ function ReviewRowComponent({
   onRemove,
 }: ReviewRowProps) {
   return (
-    <tr className="border-b border-neutral-100 dark:border-neutral-800">
+    <tr
+      className={`border-b border-neutral-100 dark:border-neutral-800 ${
+        row.alreadyImported ? 'opacity-50' : ''
+      }`}
+    >
       <td className="py-1 px-2">
         <div className="flex items-center gap-1">
           <input
@@ -179,13 +284,37 @@ function ReviewRowComponent({
       </td>
       <td className="py-1 px-2">
         <input
-          type="text"
-          value={row.description}
-          onChange={(e) => onDescriptionChange(e.target.value)}
-          placeholder="Description"
-          aria-label="Description"
-          className="w-full border border-neutral-200 dark:border-neutral-700 rounded px-2 py-1 text-sm bg-white dark:bg-neutral-900 text-neutral-900 dark:text-white min-w-32"
+          type="time"
+          value={row.time}
+          onChange={(e) => onTimeChange(e.target.value)}
+          aria-label="Time"
+          className="w-24 border border-neutral-200 dark:border-neutral-700 rounded px-2 py-1 text-sm bg-white dark:bg-neutral-900 text-neutral-900 dark:text-white"
         />
+      </td>
+      <td className="py-1 px-2">
+        <div className="flex items-center gap-1">
+          <input
+            type="text"
+            value={row.description}
+            onChange={(e) => onDescriptionChange(e.target.value)}
+            placeholder="Description"
+            aria-label="Description"
+            className="w-full border border-neutral-200 dark:border-neutral-700 rounded px-2 py-1 text-sm bg-white dark:bg-neutral-900 text-neutral-900 dark:text-white min-w-32"
+          />
+          {row.possibleDuplicate && (
+            <span
+              data-testid="possible-duplicate-badge"
+              title={
+                row.duplicateOf?.id
+                  ? `Looks like movement #${row.duplicateOf.id} — same store, amount and date`
+                  : 'Looks like another row in this import — same store, amount and date'
+              }
+              className="rounded-full bg-warning-100 dark:bg-warning-900/30 px-2 py-0.5 text-xs text-warning-800 dark:text-warning-300 whitespace-nowrap cursor-help"
+            >
+              Possible duplicate
+            </span>
+          )}
+        </div>
       </td>
       <td className="py-1 px-2">
         <input
@@ -322,6 +451,34 @@ function ReviewRowComponent({
           </div>
         )}
       </td>
+      {showSource && (
+        <td className="py-1 px-2">
+          {row.gmailMessageId && (
+            <div className="flex items-center gap-1.5">
+              <span
+                data-testid="source-cell"
+                title={[
+                  row.emailFrom,
+                  row.emailDate ? new Date(row.emailDate).toLocaleString() : null,
+                ]
+                  .filter(Boolean)
+                  .join(' · ')}
+                className="inline-block max-w-36 truncate align-middle text-xs text-neutral-500 dark:text-neutral-400 cursor-help"
+              >
+                {row.emailSubject || row.gmailMessageId}
+              </span>
+              {row.alreadyImported && (
+                <span
+                  data-testid="already-imported-badge"
+                  className="rounded-full bg-warning-100 dark:bg-warning-900/30 px-2 py-0.5 text-xs text-warning-800 dark:text-warning-300 whitespace-nowrap"
+                >
+                  Already imported
+                </span>
+              )}
+            </div>
+          )}
+        </td>
+      )}
       <td className="py-1 px-2">
         <button
           type="button"
@@ -339,6 +496,7 @@ function ReviewRowComponent({
 
 export function Import() {
   const [step, setStep] = useState<Step>('upload');
+  const [sourceTab, setSourceTab] = useState<SourceTab>('upload');
   const [file, setFile] = useState<File | null>(null);
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
   const [processingStage, setProcessingStage] = useState<'extracting' | 'analyzing'>('extracting');
@@ -352,6 +510,35 @@ export function Import() {
   const [confirmError, setConfirmError] = useState<string | null>(null);
   const [created, setCreated] = useState<ConfirmResponse['created'] | null>(null);
   const [resolvedCategories, setResolvedCategories] = useState<ResolvedCategory[]>([]);
+  const [gmailConnected, setGmailConnected] = useState<boolean | null>(null);
+  const [gmailNeedsReconnect, setGmailNeedsReconnect] = useState(false);
+  const [gmailLastPolledAt, setGmailLastPolledAt] = useState<string | null>(null);
+  const [gmailSenders, setGmailSenders] = useState<GmailSender[]>([]);
+  const [gmailSetupLoading, setGmailSetupLoading] = useState(false);
+  const [gmailSetupError, setGmailSetupError] = useState<string | null>(null);
+  const [gmailMessages, setGmailMessages] = useState<GmailMessage[]>([]);
+  const [gmailMessagesLoading, setGmailMessagesLoading] = useState(false);
+  const [gmailMessagesError, setGmailMessagesError] = useState<string | null>(null);
+  const [gmailNextPageToken, setGmailNextPageToken] = useState<string | null>(null);
+  const [gmailSelected, setGmailSelected] = useState<Set<string>>(new Set());
+  const [gmailPreset, setGmailPreset] = useState<GmailPreset>('last-30-days');
+  const initialRange = useRef(dateRangeForPreset('last-30-days'));
+  const [gmailFrom, setGmailFrom] = useState(initialRange.current.from);
+  const [gmailTo, setGmailTo] = useState(initialRange.current.to);
+  const [gmailSender, setGmailSender] = useState('');
+  const [gmailSubjectInput, setGmailSubjectInput] = useState('');
+  const [gmailSubject, setGmailSubject] = useState('');
+  const [gmailExtracting, setGmailExtracting] = useState(false);
+  const [gmailEmailErrors, setGmailEmailErrors] = useState<ExtractEmailResult[]>([]);
+  const [pendingEmails, setPendingEmails] = useState<GmailPendingEmail[]>([]);
+  const [pendingErrorEmails, setPendingErrorEmails] = useState<GmailPendingEmail[]>([]);
+  const [pendingLoading, setPendingLoading] = useState(false);
+  const [pendingError, setPendingError] = useState<string | null>(null);
+  const [pendingSelected, setPendingSelected] = useState<Set<string>>(new Set());
+  const [pendingRetrying, setPendingRetrying] = useState<string | null>(null);
+  const [pollingNow, setPollingNow] = useState(false);
+  const [reviewSource, setReviewSource] = useState<SourceTab>('upload');
+  const [importedEmailCount, setImportedEmailCount] = useState(0);
 
   const fileInputRef = useRef<HTMLInputElement>(null);
   const suggestTimers = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map());
@@ -363,11 +550,109 @@ export function Import() {
   }, []);
 
   useEffect(() => {
+    if (sourceTab !== 'gmail') return;
+    let cancelled = false;
+    setGmailSetupLoading(true);
+    setGmailSetupError(null);
+    Promise.all([getGmailStatus(), getGmailSenders()])
+      .then(([status, senders]) => {
+        if (cancelled) return;
+        setGmailConnected(status.connected);
+        setGmailNeedsReconnect(status.needsReconnect ?? false);
+        setGmailLastPolledAt(status.lastPolledAt ?? null);
+        setGmailSenders(senders);
+      })
+      .catch((err) => {
+        if (cancelled) return;
+        setGmailSetupError(err instanceof Error ? err.message : 'Could not load Gmail settings.');
+        setGmailConnected(false);
+        setGmailSenders([]);
+      })
+      .finally(() => {
+        if (!cancelled) setGmailSetupLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [sourceTab]);
+
+  useEffect(() => {
+    if (sourceTab !== 'gmail') return;
+    const timer = setTimeout(() => setGmailSubject(gmailSubjectInput.trim()), 300);
+    return () => clearTimeout(timer);
+  }, [gmailSubjectInput, sourceTab]);
+
+  useEffect(() => {
+    if (sourceTab !== 'gmail' || gmailConnected !== true || gmailSenders.length === 0) return;
+    void loadGmailMessages(false);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sourceTab, gmailConnected, gmailSenders.length, gmailFrom, gmailTo, gmailSender, gmailSubject]);
+
+  useEffect(() => {
+    if (sourceTab !== 'gmail' || gmailConnected !== true || gmailSenders.length === 0) return;
+    void loadPendingQueue();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sourceTab, gmailConnected, gmailSenders.length]);
+
+  useEffect(() => {
     return () => {
       suggestTimers.current.forEach((t) => clearTimeout(t));
       if (stageTimerRef.current) clearTimeout(stageTimerRef.current);
     };
   }, []);
+
+  async function loadGmailMessages(append: boolean, pageToken?: string) {
+    setGmailMessagesLoading(true);
+    setGmailMessagesError(null);
+    try {
+      const result = await getGmailMessages({
+        from: gmailFrom,
+        to: gmailTo,
+        sender: gmailSender || undefined,
+        subject: gmailSubject || undefined,
+        pageToken,
+      });
+      setGmailMessages((prev) => (append ? [...prev, ...result.messages] : result.messages));
+      setGmailNextPageToken(result.nextPageToken);
+      if (!append) setGmailSelected(new Set());
+    } catch (err) {
+      const reconnect =
+        err instanceof GmailApiError && err.code === 'GMAIL_RECONNECT_REQUIRED'
+          ? 'Reconnect Gmail to keep importing emails.'
+          : null;
+      setGmailMessagesError(reconnect ?? (err instanceof Error ? err.message : 'Could not load Gmail messages.'));
+      if (!append) setGmailMessages([]);
+    } finally {
+      setGmailMessagesLoading(false);
+    }
+  }
+
+  async function loadPendingQueue() {
+    setPendingLoading(true);
+    setPendingError(null);
+    try {
+      const [pending, errors] = await Promise.all([
+        getGmailPending('pending'),
+        getGmailPending('error'),
+      ]);
+      setPendingEmails(pending.emails);
+      setPendingErrorEmails(errors.emails);
+      setPendingSelected((prev) => {
+        const available = new Set(pending.emails.map((email) => email.messageId));
+        return new Set([...prev].filter((id) => available.has(id)));
+      });
+      requestGmailPendingRefresh();
+    } catch (err) {
+      if (err instanceof GmailApiError && err.code === 'GMAIL_RECONNECT_REQUIRED') {
+        setGmailNeedsReconnect(true);
+        setPendingError('Reconnect Gmail to review pending imports.');
+      } else {
+        setPendingError(err instanceof Error ? err.message : 'Could not load pending imports.');
+      }
+    } finally {
+      setPendingLoading(false);
+    }
+  }
 
   function applyFile(f: File) {
     setFile(f);
@@ -395,6 +680,7 @@ export function Import() {
 
   async function handleProcess() {
     if (!file) return;
+    setReviewSource('upload');
     setStep('processing');
     setProcessingStage('extracting');
 
@@ -415,7 +701,7 @@ export function Import() {
         setRows([]);
       } else {
         setExtractError(null);
-        setRows(result.movements.map(movementToRow));
+        setRows(result.movements.map((m) => movementToRow(m)));
       }
       setStep('review');
     } catch {
@@ -423,6 +709,143 @@ export function Import() {
       setExtractError('Failed to process image. Please try again.');
       setRows([]);
       setStep('review');
+    }
+  }
+
+  function handlePresetChange(preset: GmailPreset) {
+    setGmailPreset(preset);
+    if (preset !== 'custom') {
+      const range = dateRangeForPreset(preset);
+      setGmailFrom(range.from);
+      setGmailTo(range.to);
+    }
+  }
+
+  function toggleGmailSelected(id: string) {
+    setGmailSelected((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) {
+        next.delete(id);
+      } else if (next.size < 25) {
+        next.add(id);
+      }
+      return next;
+    });
+  }
+
+  async function handleExtractEmails(messageIds?: string[]) {
+    const ids = messageIds ?? Array.from(gmailSelected);
+    if (ids.length === 0) return;
+    setGmailExtracting(true);
+    setGmailEmailErrors((prev) => prev.filter((entry) => !ids.includes(entry.messageId)));
+    try {
+      const result = await extractFromEmails(ids);
+      const failed = result.emails.filter((email) => email.error);
+      const newRows = result.emails.flatMap((email) =>
+        email.error ? [] : email.movements.map((m) => movementToRow(m, email))
+      );
+      setGmailEmailErrors((prev) => [...prev, ...failed]);
+      if (newRows.length > 0) {
+        setRows((prev) => [...prev, ...newRows]);
+        setRawText('');
+        setAttachmentId(undefined);
+        setExtractError(null);
+        setReviewSource('gmail');
+        setStep('review');
+      }
+      if (failed.length === 0) {
+        // Zero movements still moves to review, where the empty state offers
+        // a way back to the email list
+        setReviewSource('gmail');
+        setStep('review');
+      }
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Could not extract selected emails.';
+      setGmailEmailErrors((prev) => [
+        ...prev,
+        ...ids.map((id) => ({
+          messageId: id,
+          movements: [],
+          error: message,
+        })),
+      ]);
+    } finally {
+      setGmailExtracting(false);
+    }
+  }
+
+  function togglePendingSelected(id: string) {
+    setPendingSelected((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  }
+
+  function handleReviewPending() {
+    const selected = pendingEmails.filter((email) => pendingSelected.has(email.messageId));
+    if (selected.length === 0) return;
+    const nextRows = selected.flatMap((email) =>
+      email.movements.map((movement) => movementToRow(movement as ExtractedMovement, email))
+    );
+    setRows(nextRows);
+    setGmailEmailErrors([]);
+    setRawText('');
+    setAttachmentId(undefined);
+    setExtractError(null);
+    setReviewSource('gmail');
+    setStep('review');
+  }
+
+  async function handleDismissPending(messageId: string) {
+    if (!window.confirm("Dismiss — this email won't be suggested again?")) return;
+    await dismissGmailPending(messageId);
+    setPendingEmails((prev) => prev.filter((email) => email.messageId !== messageId));
+    setPendingSelected((prev) => {
+      const next = new Set(prev);
+      next.delete(messageId);
+      return next;
+    });
+    requestGmailPendingRefresh();
+  }
+
+  async function handleRetryPending(messageId: string) {
+    setPendingRetrying(messageId);
+    setPendingError(null);
+    try {
+      await retryGmailPending(messageId);
+      await loadPendingQueue();
+    } catch (err) {
+      if (err instanceof GmailApiError && err.code === 'GMAIL_RECONNECT_REQUIRED') {
+        setGmailNeedsReconnect(true);
+        setPendingError('Reconnect Gmail to continue importing emails.');
+      } else {
+        setPendingError(err instanceof Error ? err.message : 'Could not retry this email.');
+      }
+    } finally {
+      setPendingRetrying(null);
+    }
+  }
+
+  async function handlePollNow() {
+    setPollingNow(true);
+    setPendingError(null);
+    try {
+      await pollGmailNow();
+      const status = await getGmailStatus();
+      setGmailNeedsReconnect(status.needsReconnect ?? false);
+      setGmailLastPolledAt(status.lastPolledAt ?? null);
+      await loadPendingQueue();
+    } catch (err) {
+      if (err instanceof GmailApiError && err.code === 'GMAIL_RECONNECT_REQUIRED') {
+        setGmailNeedsReconnect(true);
+        setPendingError('Reconnect Gmail to continue importing emails.');
+      } else {
+        setPendingError(err instanceof Error ? err.message : 'Could not check Gmail now.');
+      }
+    } finally {
+      setPollingNow(false);
     }
   }
 
@@ -540,23 +963,48 @@ export function Import() {
     setConfirming(true);
     setConfirmError(null);
     try {
-      const movements = rows
-        .filter((r) => r.amount.trim() !== '')
-        .map((r) => {
-          const base = {
-            amount: Number(r.amount),
-            date: r.date,
-            description: r.description || undefined,
-            store: r.store || undefined,
-            payment_method_id: r.paymentMethodId ?? null,
-          };
-          const newName = r.newCategoryName?.trim();
-          return newName
-            ? { ...base, new_category_name: newName }
-            : { ...base, category_id: r.categoryId ?? null };
-        });
+      const confirmable = rows.filter((r) => r.amount.trim() !== '' && !r.alreadyImported);
+      const movements = confirmable.map((r) => {
+        const base = {
+          amount: Number(r.amount),
+          date: r.date,
+          time: r.time || null,
+          description: r.description || undefined,
+          store: r.store || undefined,
+          payment_method_id: r.paymentMethodId ?? null,
+          gmail_message_id: r.gmailMessageId ?? undefined,
+        };
+        const newName = r.newCategoryName?.trim();
+        return newName
+          ? { ...base, new_category_name: newName }
+          : { ...base, category_id: r.categoryId ?? null };
+      });
 
       const result = await confirmImport({ attachmentId, movements });
+      const importedEmailIds = [
+        ...new Set(confirmable.flatMap((r) => (r.gmailMessageId ? [r.gmailMessageId] : []))),
+      ];
+      setImportedEmailCount(importedEmailIds.length);
+      if (importedEmailIds.length > 0) {
+        // Reflect the new Imported badges in the already-loaded email list
+        // without re-fetching from Gmail
+        const importedSet = new Set(importedEmailIds);
+        setGmailMessages((prev) =>
+          prev.map((m) => (importedSet.has(m.id) ? { ...m, alreadyImported: true } : m))
+        );
+        setGmailSelected((prev) => {
+          const next = new Set(prev);
+          importedEmailIds.forEach((id) => next.delete(id));
+          return next;
+        });
+        setPendingEmails((prev) => prev.filter((email) => !importedSet.has(email.messageId)));
+        setPendingSelected((prev) => {
+          const next = new Set(prev);
+          importedEmailIds.forEach((id) => next.delete(id));
+          return next;
+        });
+        requestGmailPendingRefresh();
+      }
       setCreated(result.created);
       setResolvedCategories(result.resolvedCategories ?? []);
       if (result.resolvedCategories?.length) {
@@ -576,85 +1024,470 @@ export function Import() {
         });
       }
       setStep('confirm');
-    } catch {
-      setConfirmError('Failed to import movements. Please try again.');
+    } catch (err) {
+      const conflictIds =
+        axios.isAxiosError(err) && err.response?.status === 409
+          ? (err.response.data?.details?.alreadyImported as string[] | undefined)
+          : undefined;
+      if (conflictIds && conflictIds.length > 0) {
+        const conflictSet = new Set(conflictIds);
+        setRows((prev) =>
+          prev.map((r) =>
+            r.gmailMessageId && conflictSet.has(r.gmailMessageId)
+              ? { ...r, alreadyImported: true }
+              : r
+          )
+        );
+        setGmailMessages((prev) =>
+          prev.map((m) => (conflictSet.has(m.id) ? { ...m, alreadyImported: true } : m))
+        );
+        setConfirmError(
+          'Some emails were already imported. The marked rows were skipped — import the remaining rows.'
+        );
+      } else {
+        setConfirmError('Failed to import movements. Please try again.');
+      }
     } finally {
       setConfirming(false);
     }
   }
 
-  if (step === 'upload') {
+  function renderGmailEmailErrors() {
+    if (gmailEmailErrors.length === 0) return null;
     return (
-      <main className="flex-1 overflow-y-auto p-6 max-w-2xl mx-auto">
-        <h1 className="text-2xl font-semibold text-neutral-900 dark:text-white">Import from Image</h1>
-        <p className="mt-2 text-neutral-500 dark:text-neutral-400">
-          Upload a receipt or invoice image to extract expenses automatically.
-        </p>
+      <div className="mt-4 space-y-2">
+        {gmailEmailErrors.map((email) => (
+          <div
+            key={email.messageId}
+            className="flex items-center justify-between gap-3 rounded-lg border border-warning-200 dark:border-warning-800 bg-warning-50 dark:bg-warning-900/20 p-3 text-sm"
+          >
+            <span className="text-warning-800 dark:text-warning-300">
+              {email.subject || email.messageId}: {email.error}
+            </span>
+            <button
+              type="button"
+              onClick={() => handleExtractEmails([email.messageId])}
+              disabled={gmailExtracting}
+              className="text-primary-600 hover:text-primary-700 font-medium disabled:opacity-50"
+            >
+              Retry
+            </button>
+          </div>
+        ))}
+      </div>
+    );
+  }
 
+  function renderPendingSection() {
+    const selectedPending = pendingSelected.size;
+    const lastChecked = gmailLastPolledAt
+      ? new Date(gmailLastPolledAt).toLocaleString()
+      : 'Never';
+
+    if (gmailNeedsReconnect) {
+      return (
         <div
-          data-testid="dropzone"
-          onDragOver={handleDragOver}
-          onDrop={handleDrop}
-          onClick={() => !file && fileInputRef.current?.click()}
-          className="mt-6 border-2 border-dashed border-neutral-300 dark:border-neutral-600 rounded-xl p-12 flex flex-col items-center justify-center gap-3 hover:border-primary-500 hover:bg-neutral-50 dark:hover:bg-neutral-800/50 transition-colors"
-          style={{ cursor: file ? 'default' : 'pointer' }}
+          role="alert"
+          className="mb-6 flex items-center justify-between gap-3 rounded-lg border border-warning-200 bg-warning-50 p-4 text-sm text-warning-800 dark:border-warning-900 dark:bg-warning-900/30 dark:text-warning-200"
         >
-          {file ? (
-            <div className="flex flex-col items-center gap-2">
-              {previewUrl ? (
-                <img
-                  src={previewUrl}
-                  alt="Preview"
-                  data-testid="file-preview"
-                  className="max-h-48 max-w-full rounded-lg object-contain"
-                />
-              ) : (
-                <div data-testid="pdf-icon" className="text-5xl">📄</div>
-              )}
-              <p className="text-sm text-neutral-600 dark:text-neutral-400 text-center">{file.name}</p>
-              <button
-                type="button"
-                onClick={(e) => {
-                  e.stopPropagation();
-                  setFile(null);
-                  setPreviewUrl(null);
-                  if (fileInputRef.current) fileInputRef.current.value = '';
-                }}
-                className="text-xs text-danger-600 hover:underline"
-              >
-                Remove
-              </button>
-            </div>
-          ) : (
-            <>
-              <div className="text-4xl text-neutral-400">📤</div>
-              <p className="text-neutral-600 dark:text-neutral-400 text-sm text-center">
-                Drag and drop a JPEG, PNG, or PDF, or{' '}
-                <span className="text-primary-600 font-medium">browse</span>
-              </p>
-            </>
-          )}
-          <input
-            ref={fileInputRef}
-            type="file"
-            accept="image/jpeg,image/png,image/webp,application/pdf"
-            className="hidden"
-            onChange={handleFileChange}
-            data-testid="file-input"
-          />
+          <span>Reconnect Gmail to review pending imports.</span>
+          <a
+            href="/settings/gmail"
+            className="rounded bg-warning-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-warning-700"
+          >
+            Reconnect
+          </a>
+        </div>
+      );
+    }
+
+    return (
+      <section className="mb-6">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div>
+            <h2 className="text-lg font-medium text-neutral-900 dark:text-white">Pending review</h2>
+            <p className="mt-1 text-xs text-neutral-500">Last checked: {lastChecked}</p>
+          </div>
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={handlePollNow}
+              disabled={pollingNow}
+              className="rounded border border-neutral-200 px-3 py-2 text-sm text-neutral-700 hover:bg-neutral-100 disabled:opacity-50 dark:border-neutral-700 dark:text-neutral-300 dark:hover:bg-neutral-800"
+            >
+              {pollingNow ? 'Checking...' : 'Check now'}
+            </button>
+            <button
+              type="button"
+              onClick={handleReviewPending}
+              disabled={selectedPending === 0}
+              className="rounded bg-primary-600 px-4 py-2 text-sm font-medium text-white hover:bg-primary-700 disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              Review {selectedPending} email{selectedPending !== 1 ? 's' : ''}
+            </button>
+          </div>
         </div>
 
-        <div className="mt-4 flex justify-end">
+        {pendingError && <p className="mt-3 text-sm text-danger-600">{pendingError}</p>}
+        {pendingLoading && <p className="mt-3 text-sm text-neutral-500">Loading pending imports...</p>}
+
+        {pendingErrorEmails.length > 0 && (
+          <div className="mt-4 space-y-2">
+            {pendingErrorEmails.map((email) => (
+              <div
+                key={email.messageId}
+                className="flex items-center justify-between gap-3 rounded-lg border border-warning-200 bg-warning-50 p-3 text-sm dark:border-warning-800 dark:bg-warning-900/20"
+              >
+                <div className="min-w-0">
+                  <p className="font-medium text-warning-900 dark:text-warning-200">
+                    {email.subject || email.messageId}
+                  </p>
+                  <p className="mt-1 text-warning-800 dark:text-warning-300">
+                    {email.error || 'Extraction failed'}
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => handleRetryPending(email.messageId)}
+                  disabled={pendingRetrying === email.messageId}
+                  className="text-primary-600 hover:text-primary-700 font-medium disabled:opacity-50"
+                >
+                  {pendingRetrying === email.messageId ? 'Retrying...' : 'Retry'}
+                </button>
+              </div>
+            ))}
+          </div>
+        )}
+
+        <div className="mt-4 grid gap-3">
+          {pendingEmails.map((email) => {
+            const checked = pendingSelected.has(email.messageId);
+            return (
+              <article
+                key={email.messageId}
+                data-testid="pending-email-card"
+                className="rounded-lg border border-neutral-200 bg-white p-4 dark:border-neutral-700 dark:bg-neutral-800"
+              >
+                <div className="flex items-start gap-3">
+                  <input
+                    type="checkbox"
+                    aria-label={`Select pending email ${email.messageId}`}
+                    checked={checked}
+                    onChange={() => togglePendingSelected(email.messageId)}
+                    className="mt-1"
+                  />
+                  <div className="min-w-0 flex-1">
+                    <div className="flex items-center justify-between gap-3">
+                      <p className="truncate font-medium text-neutral-900 dark:text-white">
+                        {email.subject || email.messageId}
+                      </p>
+                      <button
+                        type="button"
+                        aria-label={`Dismiss ${email.messageId}`}
+                        onClick={() => handleDismissPending(email.messageId)}
+                        className="text-neutral-400 hover:text-danger-600 text-lg leading-none"
+                      >
+                        ×
+                      </button>
+                    </div>
+                    <p className="mt-1 text-xs text-neutral-500">
+                      {email.from || 'Unknown sender'} ·{' '}
+                      {email.date ? new Date(email.date).toLocaleString() : 'Unknown date'}
+                    </p>
+                    <ul className="mt-3 space-y-1">
+                      {email.movements.map((movement, index) => (
+                        <li key={index} className="text-sm text-neutral-600 dark:text-neutral-300">
+                          {(movement.store || movement.description || 'Movement')} — $
+                          {Number(movement.amount).toFixed(2)} — {movement.date}
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                </div>
+              </article>
+            );
+          })}
+          {!pendingLoading && pendingEmails.length === 0 && (
+            <p className="rounded-lg border border-neutral-200 bg-white p-4 text-sm text-neutral-500 dark:border-neutral-700 dark:bg-neutral-800">
+              No pending emails.
+            </p>
+          )}
+        </div>
+      </section>
+    );
+  }
+
+  if (step === 'upload') {
+    const selectedCount = gmailSelected.size;
+    const gmailReady = gmailConnected === true && gmailSenders.length > 0;
+    return (
+      <main className="flex-1 overflow-y-auto p-6 max-w-5xl mx-auto w-full">
+        <h1 className="text-2xl font-semibold text-neutral-900 dark:text-white">Import Movements</h1>
+
+        <div role="tablist" aria-label="Import source" className="mt-5 inline-flex rounded-lg border border-neutral-200 dark:border-neutral-700 p-1 bg-white dark:bg-neutral-800">
           <button
             type="button"
-            onClick={handleProcess}
-            disabled={!file}
-            data-testid="process-button"
-            className="px-5 py-2 bg-primary-600 hover:bg-primary-700 disabled:opacity-50 disabled:cursor-not-allowed text-white rounded-lg font-medium transition-colors"
+            role="tab"
+            aria-selected={sourceTab === 'upload'}
+            onClick={() => setSourceTab('upload')}
+            className={`px-4 py-2 rounded-md text-sm font-medium transition-colors ${
+              sourceTab === 'upload'
+                ? 'bg-primary-600 text-white'
+                : 'text-neutral-600 dark:text-neutral-300 hover:bg-neutral-100 dark:hover:bg-neutral-700'
+            }`}
           >
-            Process Image
+            Upload receipt
+          </button>
+          <button
+            type="button"
+            role="tab"
+            aria-selected={sourceTab === 'gmail'}
+            onClick={() => setSourceTab('gmail')}
+            className={`px-4 py-2 rounded-md text-sm font-medium transition-colors ${
+              sourceTab === 'gmail'
+                ? 'bg-primary-600 text-white'
+                : 'text-neutral-600 dark:text-neutral-300 hover:bg-neutral-100 dark:hover:bg-neutral-700'
+            }`}
+          >
+            From Gmail
           </button>
         </div>
+
+        {sourceTab === 'upload' ? (
+          <section className="max-w-2xl">
+            <p className="mt-4 text-neutral-500 dark:text-neutral-400">
+              Upload a receipt or invoice image to extract expenses automatically.
+            </p>
+
+            <div
+              data-testid="dropzone"
+              onDragOver={handleDragOver}
+              onDrop={handleDrop}
+              onClick={() => !file && fileInputRef.current?.click()}
+              className="mt-6 border-2 border-dashed border-neutral-300 dark:border-neutral-600 rounded-xl p-12 flex flex-col items-center justify-center gap-3 hover:border-primary-500 hover:bg-neutral-50 dark:hover:bg-neutral-800/50 transition-colors"
+              style={{ cursor: file ? 'default' : 'pointer' }}
+            >
+              {file ? (
+                <div className="flex flex-col items-center gap-2">
+                  {previewUrl ? (
+                    <img
+                      src={previewUrl}
+                      alt="Preview"
+                      data-testid="file-preview"
+                      className="max-h-48 max-w-full rounded-lg object-contain"
+                    />
+                  ) : (
+                    <div data-testid="pdf-icon" className="text-5xl">📄</div>
+                  )}
+                  <p className="text-sm text-neutral-600 dark:text-neutral-400 text-center">{file.name}</p>
+                  <button
+                    type="button"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setFile(null);
+                      setPreviewUrl(null);
+                      if (fileInputRef.current) fileInputRef.current.value = '';
+                    }}
+                    className="text-xs text-danger-600 hover:underline"
+                  >
+                    Remove
+                  </button>
+                </div>
+              ) : (
+                <>
+                  <div className="text-4xl text-neutral-400">📤</div>
+                  <p className="text-neutral-600 dark:text-neutral-400 text-sm text-center">
+                    Drag and drop a JPEG, PNG, or PDF, or{' '}
+                    <span className="text-primary-600 font-medium">browse</span>
+                  </p>
+                </>
+              )}
+              <input
+                ref={fileInputRef}
+                type="file"
+                accept="image/jpeg,image/png,image/webp,application/pdf"
+                className="hidden"
+                onChange={handleFileChange}
+                data-testid="file-input"
+              />
+            </div>
+
+            <div className="mt-4 flex justify-end">
+              <button
+                type="button"
+                onClick={handleProcess}
+                disabled={!file}
+                data-testid="process-button"
+                className="px-5 py-2 bg-primary-600 hover:bg-primary-700 disabled:opacity-50 disabled:cursor-not-allowed text-white rounded-lg font-medium transition-colors"
+              >
+                Process Image
+              </button>
+            </div>
+          </section>
+        ) : (
+          <section className="mt-6">
+            {gmailSetupLoading && <p className="text-sm text-neutral-500">Loading Gmail settings...</p>}
+            {gmailSetupError && <p className="text-sm text-danger-600">{gmailSetupError}</p>}
+            {!gmailSetupLoading && gmailConnected === false && (
+              <div className="rounded-lg border border-neutral-200 dark:border-neutral-700 bg-white dark:bg-neutral-800 p-5 max-w-xl">
+                <h2 className="text-lg font-medium text-neutral-900 dark:text-white">Connect Gmail</h2>
+                <p className="mt-2 text-sm text-neutral-500 dark:text-neutral-400">
+                  Import movements from your bank notification emails.
+                </p>
+                <a
+                  href="/settings/gmail"
+                  className="mt-4 inline-flex px-4 py-2 bg-primary-600 hover:bg-primary-700 text-white rounded-lg text-sm font-medium"
+                >
+                  Connect Gmail
+                </a>
+              </div>
+            )}
+            {!gmailSetupLoading && gmailConnected === true && gmailSenders.length === 0 && (
+              <div className="rounded-lg border border-neutral-200 dark:border-neutral-700 bg-white dark:bg-neutral-800 p-5 max-w-xl">
+                <h2 className="text-lg font-medium text-neutral-900 dark:text-white">
+                  Add the addresses your bank sends purchase alerts from
+                </h2>
+                <a
+                  href="/settings/gmail"
+                  className="mt-4 inline-flex px-4 py-2 bg-primary-600 hover:bg-primary-700 text-white rounded-lg text-sm font-medium"
+                >
+                  Configure senders
+                </a>
+              </div>
+            )}
+            {gmailReady && (
+              <>
+                {renderPendingSection()}
+                <div className="grid gap-3 md:grid-cols-[160px_160px_180px_1fr] items-end">
+                  <label className="text-sm text-neutral-600 dark:text-neutral-400">
+                    Range
+                    <select
+                      value={gmailPreset}
+                      onChange={(e) => handlePresetChange(e.target.value as GmailPreset)}
+                      className="mt-1 w-full border border-neutral-200 dark:border-neutral-700 rounded px-2 py-2 bg-white dark:bg-neutral-900 text-neutral-900 dark:text-white"
+                    >
+                      <option value="this-week">This week</option>
+                      <option value="this-month">This month</option>
+                      <option value="last-week">Last week</option>
+                      <option value="last-month">Last month</option>
+                      <option value="last-30-days">Last 30 days</option>
+                      <option value="custom">Custom</option>
+                    </select>
+                  </label>
+                  {gmailPreset === 'custom' && (
+                    <>
+                      <label className="text-sm text-neutral-600 dark:text-neutral-400">
+                        From
+                        <input
+                          type="date"
+                          value={gmailFrom}
+                          onChange={(e) => setGmailFrom(e.target.value)}
+                          className="mt-1 w-full border border-neutral-200 dark:border-neutral-700 rounded px-2 py-2 bg-white dark:bg-neutral-900 text-neutral-900 dark:text-white"
+                        />
+                      </label>
+                      <label className="text-sm text-neutral-600 dark:text-neutral-400">
+                        To
+                        <input
+                          type="date"
+                          value={gmailTo}
+                          onChange={(e) => setGmailTo(e.target.value)}
+                          className="mt-1 w-full border border-neutral-200 dark:border-neutral-700 rounded px-2 py-2 bg-white dark:bg-neutral-900 text-neutral-900 dark:text-white"
+                        />
+                      </label>
+                    </>
+                  )}
+                  <label className="text-sm text-neutral-600 dark:text-neutral-400">
+                    Sender
+                    <select
+                      aria-label="Sender"
+                      value={gmailSender}
+                      onChange={(e) => setGmailSender(e.target.value)}
+                      className="mt-1 w-full border border-neutral-200 dark:border-neutral-700 rounded px-2 py-2 bg-white dark:bg-neutral-900 text-neutral-900 dark:text-white"
+                    >
+                      <option value="">All senders</option>
+                      {gmailSenders.map((sender) => (
+                        <option key={sender.id} value={sender.email}>
+                          {sender.label || sender.email}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  <label className="text-sm text-neutral-600 dark:text-neutral-400">
+                    Subject
+                    <input
+                      type="search"
+                      aria-label="Subject"
+                      value={gmailSubjectInput}
+                      onChange={(e) => setGmailSubjectInput(e.target.value)}
+                      placeholder="Search subject"
+                      className="mt-1 w-full border border-neutral-200 dark:border-neutral-700 rounded px-2 py-2 bg-white dark:bg-neutral-900 text-neutral-900 dark:text-white"
+                    />
+                  </label>
+                </div>
+
+                {renderGmailEmailErrors()}
+
+                <div className="mt-4 flex items-center justify-between">
+                  <span className="text-sm text-neutral-500">{selectedCount} / 25 selected</span>
+                  <button
+                    type="button"
+                    onClick={() => handleExtractEmails()}
+                    disabled={selectedCount === 0 || gmailExtracting}
+                    className="px-4 py-2 bg-primary-600 hover:bg-primary-700 disabled:opacity-50 disabled:cursor-not-allowed text-white rounded-lg text-sm font-medium"
+                  >
+                    {gmailExtracting ? 'Extracting...' : `Extract ${selectedCount} email${selectedCount !== 1 ? 's' : ''}`}
+                  </button>
+                </div>
+
+                {gmailMessagesError && <p className="mt-4 text-sm text-danger-600">{gmailMessagesError}</p>}
+                <div className="mt-4 divide-y divide-neutral-100 dark:divide-neutral-800 rounded-lg border border-neutral-200 dark:border-neutral-700 bg-white dark:bg-neutral-800">
+                  {gmailMessages.map((message) => {
+                    const checked = gmailSelected.has(message.id);
+                    const disabled = message.alreadyImported || (!checked && selectedCount >= 25);
+                    return (
+                      <label key={message.id} className="flex gap-3 p-4">
+                        <input
+                          type="checkbox"
+                          aria-label={`Select email ${message.id}`}
+                          checked={checked}
+                          disabled={disabled}
+                          onChange={() => toggleGmailSelected(message.id)}
+                          className="mt-1"
+                        />
+                        <div className="min-w-0 flex-1">
+                          <div className="flex items-center gap-2">
+                            <p className="font-medium text-neutral-900 dark:text-white truncate">{message.subject}</p>
+                            {message.alreadyImported && (
+                              <span className="rounded-full bg-neutral-100 dark:bg-neutral-700 px-2 py-0.5 text-xs text-neutral-500">
+                                Imported
+                              </span>
+                            )}
+                          </div>
+                          <p className="mt-1 text-xs text-neutral-500">{message.from} · {new Date(message.date).toLocaleString()}</p>
+                          <p className="mt-1 text-sm text-neutral-600 dark:text-neutral-300">{message.snippet}</p>
+                        </div>
+                      </label>
+                    );
+                  })}
+                  {!gmailMessagesLoading && gmailMessages.length === 0 && (
+                    <p className="p-6 text-center text-sm text-neutral-500">No emails found for these filters.</p>
+                  )}
+                </div>
+                {gmailMessagesLoading && <p className="mt-3 text-sm text-neutral-500">Loading emails...</p>}
+                {gmailNextPageToken && (
+                  <button
+                    type="button"
+                    onClick={() => loadGmailMessages(true, gmailNextPageToken)}
+                    disabled={gmailMessagesLoading}
+                    className="mt-4 px-4 py-2 border border-neutral-200 dark:border-neutral-700 rounded-lg text-sm text-neutral-700 dark:text-neutral-300 hover:bg-neutral-100 dark:hover:bg-neutral-800 disabled:opacity-50"
+                  >
+                    Load more
+                  </button>
+                )}
+              </>
+            )}
+          </section>
+        )}
       </main>
     );
   }
@@ -676,7 +1509,8 @@ export function Import() {
   }
 
   if (step === 'review') {
-    const validRows = rows.filter((r) => r.amount.trim() !== '');
+    const validRows = rows.filter((r) => r.amount.trim() !== '' && !r.alreadyImported);
+    const showSource = rows.some((r) => r.gmailMessageId !== null);
     return (
       <main className="flex-1 overflow-y-auto p-6">
         <h1 className="text-2xl font-semibold text-neutral-900 dark:text-white">Review Extracted Movements</h1>
@@ -691,6 +1525,8 @@ export function Import() {
             </p>
           </div>
         )}
+
+        {reviewSource === 'gmail' && renderGmailEmailErrors()}
 
         {rawText && (
           <details className="mt-4">
@@ -713,12 +1549,16 @@ export function Import() {
                 <tr className="border-b border-neutral-200 dark:border-neutral-700">
                   <th className="py-2 px-2 text-left font-medium text-neutral-600 dark:text-neutral-400">Amount</th>
                   <th className="py-2 px-2 text-left font-medium text-neutral-600 dark:text-neutral-400">Date</th>
+                  <th className="py-2 px-2 text-left font-medium text-neutral-600 dark:text-neutral-400">Time</th>
                   <th className="py-2 px-2 text-left font-medium text-neutral-600 dark:text-neutral-400">
                     Description
                   </th>
                   <th className="py-2 px-2 text-left font-medium text-neutral-600 dark:text-neutral-400">Store</th>
                   <th className="py-2 px-2 text-left font-medium text-neutral-600 dark:text-neutral-400">Category</th>
                   <th className="py-2 px-2 text-left font-medium text-neutral-600 dark:text-neutral-400">Paid with</th>
+                  {showSource && (
+                    <th className="py-2 px-2 text-left font-medium text-neutral-600 dark:text-neutral-400">Source</th>
+                  )}
                   <th className="py-2 px-2" />
                 </tr>
               </thead>
@@ -729,8 +1569,10 @@ export function Import() {
                     row={row}
                     categories={categories}
                     paymentMethods={paymentMethods}
+                    showSource={showSource}
                     onAmountChange={(val) => updateRow(row._key, { amount: val, amountSuspect: false })}
                     onDateChange={(val) => updateRow(row._key, { date: val })}
+                    onTimeChange={(val) => updateRow(row._key, { time: val })}
                     onDescriptionChange={(val) => handleRowDescriptionChange(row._key, val)}
                     onStoreChange={(val) => handleRowStoreChange(row._key, val)}
                     onCategoryChange={(id, name, color) =>
@@ -758,7 +1600,19 @@ export function Import() {
                 ))}
               </tbody>
             </table>
-            {rows.length === 0 && (
+            {rows.length === 0 && reviewSource === 'gmail' && (
+              <div className="mt-6 text-center">
+                <p className="text-neutral-500 text-sm">No movements found in the selected emails.</p>
+                <button
+                  type="button"
+                  onClick={() => setStep('upload')}
+                  className="mt-3 px-4 py-2 border border-neutral-200 dark:border-neutral-700 rounded-lg text-sm text-neutral-700 dark:text-neutral-300 hover:bg-neutral-100 dark:hover:bg-neutral-800"
+                >
+                  Back to email list
+                </button>
+              </div>
+            )}
+            {rows.length === 0 && reviewSource === 'upload' && (
               <p className="mt-4 text-center text-neutral-500 text-sm">
                 No movements extracted. Add rows manually below.
               </p>
@@ -807,6 +1661,11 @@ export function Import() {
         <p className="text-neutral-600 dark:text-neutral-400 mb-4">
           Successfully imported {created?.length ?? 0} movement{(created?.length ?? 0) !== 1 ? 's' : ''}.
         </p>
+        {importedEmailCount > 0 && (
+          <p data-testid="imported-emails-summary" className="text-neutral-600 dark:text-neutral-400 mb-4 -mt-2">
+            {importedEmailCount} email{importedEmailCount !== 1 ? 's' : ''} marked as imported.
+          </p>
+        )}
         {resolvedCategories.some((c) => c.created) && (
           <div
             data-testid="new-categories-summary"
@@ -866,12 +1725,30 @@ export function Import() {
             );
           })}
         </ul>
-        <a
-          href="/"
-          className="mt-6 inline-flex items-center gap-2 text-primary-600 hover:text-primary-700 text-sm font-medium"
-        >
-          ← View on Dashboard
-        </a>
+        <div className="mt-6 flex items-center gap-6">
+          <a
+            href="/"
+            className="inline-flex items-center gap-2 text-primary-600 hover:text-primary-700 text-sm font-medium"
+          >
+            ← View on Dashboard
+          </a>
+          {importedEmailCount > 0 && (
+            <button
+              type="button"
+              onClick={() => {
+                setRows([]);
+                setCreated(null);
+                setResolvedCategories([]);
+                setConfirmError(null);
+                setImportedEmailCount(0);
+                setStep('upload');
+              }}
+              className="inline-flex items-center gap-2 text-primary-600 hover:text-primary-700 text-sm font-medium"
+            >
+              ← Back to Gmail emails
+            </button>
+          )}
+        </div>
       </div>
     </main>
   );

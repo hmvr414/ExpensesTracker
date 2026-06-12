@@ -25,6 +25,7 @@ export function MovementForm({ open, onClose, onSaved, movement }: Props) {
 
   const [amount, setAmount] = useState('');
   const [date, setDate] = useState(today);
+  const [time, setTime] = useState('');
   const [description, setDescription] = useState('');
   const [store, setStore] = useState('');
   const [categoryId, setCategoryId] = useState<number | null>(null);
@@ -63,6 +64,7 @@ export function MovementForm({ open, onClose, onSaved, movement }: Props) {
     if (movement) {
       setAmount(movement.amount);
       setDate(movement.date);
+      setTime(movement.time ?? '');
       setDescription(movement.description ?? '');
       setStore(movement.store ?? '');
       setCategoryId(movement.category_id);
@@ -73,6 +75,7 @@ export function MovementForm({ open, onClose, onSaved, movement }: Props) {
     } else {
       setAmount('');
       setDate(today);
+      setTime('');
       setDescription('');
       setStore('');
       setCategoryId(null);
@@ -190,6 +193,7 @@ export function MovementForm({ open, onClose, onSaved, movement }: Props) {
         const updated = await updateMovement(movement.id, {
           amount: parseFloat(amount),
           date,
+          time: time || null,
           description: description || undefined,
           store: store || undefined,
           ...categoryPayload,
@@ -200,6 +204,7 @@ export function MovementForm({ open, onClose, onSaved, movement }: Props) {
         const created = await createMovement({
           amount: parseFloat(amount),
           date,
+          time: time || null,
           description: description || undefined,
           store: store || undefined,
           ...categoryPayload,
@@ -294,29 +299,46 @@ export function MovementForm({ open, onClose, onSaved, movement }: Props) {
               )}
             </div>
 
-            {/* Date */}
-            <div>
-              <label
-                htmlFor="date"
-                className="block text-sm font-medium text-neutral-700 dark:text-neutral-300 mb-1"
-              >
-                Date{' '}
-                <span aria-hidden="true" className="text-danger-600">
-                  *
-                </span>
-              </label>
-              <input
-                id="date"
-                type="date"
-                value={date}
-                onChange={(e) => setDate(e.target.value)}
-                className={`w-full rounded-lg border px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-primary-500 ${
-                  errors.date ? 'border-danger-500' : 'border-neutral-300 dark:border-neutral-600'
-                } bg-white dark:bg-neutral-700 text-neutral-900 dark:text-white`}
-              />
-              {errors.date && (
-                <p className="mt-1 text-xs text-danger-600">{errors.date}</p>
-              )}
+            {/* Date and time */}
+            <div className="grid grid-cols-[minmax(0,1fr)_8rem] gap-3">
+              <div>
+                <label
+                  htmlFor="date"
+                  className="block text-sm font-medium text-neutral-700 dark:text-neutral-300 mb-1"
+                >
+                  Date{' '}
+                  <span aria-hidden="true" className="text-danger-600">
+                    *
+                  </span>
+                </label>
+                <input
+                  id="date"
+                  type="date"
+                  value={date}
+                  onChange={(e) => setDate(e.target.value)}
+                  className={`w-full rounded-lg border px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-primary-500 ${
+                    errors.date ? 'border-danger-500' : 'border-neutral-300 dark:border-neutral-600'
+                  } bg-white dark:bg-neutral-700 text-neutral-900 dark:text-white`}
+                />
+                {errors.date && (
+                  <p className="mt-1 text-xs text-danger-600">{errors.date}</p>
+                )}
+              </div>
+              <div>
+                <label
+                  htmlFor="time"
+                  className="block text-sm font-medium text-neutral-700 dark:text-neutral-300 mb-1"
+                >
+                  Time
+                </label>
+                <input
+                  id="time"
+                  type="time"
+                  value={time}
+                  onChange={(e) => setTime(e.target.value)}
+                  className="w-full rounded-lg border border-neutral-300 dark:border-neutral-600 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-primary-500 bg-white dark:bg-neutral-700 text-neutral-900 dark:text-white"
+                />
+              </div>
             </div>
 
             {/* Store */}

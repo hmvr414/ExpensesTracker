@@ -62,8 +62,11 @@ describe('POST /api/import/extract', () => {
   });
 
   afterAll(async () => {
-    await pool.query(`DELETE FROM attachments WHERE file_name LIKE '__imp_%'`);
-    await pool.end();
+    if (pool) {
+      await pool.query(`DELETE FROM movements WHERE description LIKE '__imp_%'`);
+      await pool.query(`DELETE FROM attachments WHERE file_name LIKE '__imp_%'`);
+      await pool.end();
+    }
     fs.rmSync(uploadDir, { recursive: true, force: true });
   });
 
@@ -181,6 +184,121 @@ describe('POST /api/import/extract', () => {
     expect(mv.categoryName).toBe('Food');
     expect(mv.color).toBe('#FF0000');
     expect(mv.aiSuggested).toBe(true);
+  });
+
+  it('200: normalizes extracted times and drops malformed times without rejecting movements', async () => {
+    mockCreate.mockResolvedValue({
+      choices: [
+        {
+          message: {
+            content: JSON.stringify({
+              movements: [
+                { amount: 10, date: '2024-06-01', store: 'A', time: '14:32' },
+                { amount: 11, date: '2024-06-01', store: 'B', time: '2:32 PM' },
+                { amount: 12, date: '2024-06-01', store: 'C', time: '02:32 p. m.' },
+                { amount: 13, date: '2024-06-01', store: 'D', time: null },
+                { amount: 14, date: '2024-06-01', store: 'E', time: '99:99' },
+              ],
+            }),
+          },
+        },
+      ],
+    });
+
+    const res = await request(app)
+      .post('/api/import/extract')
+      .attach('file', Buffer.from('fake-jpeg'), {
+        filename: '__imp_times.jpg',
+        contentType: 'image/jpeg',
+      });
+
+    expect(res.status).toBe(200);
+    expect(res.body.movements.map((m: { time: string | null }) => m.time)).toEqual([
+      '14:32',
+      '14:32',
+      '14:32',
+      null,
+      null,
+    ]);
+  });
+
+  it('200: flags possible duplicates against existing movements and suppresses them when times differ', async () => {
+    await pool.query(
+      `INSERT INTO movements (amount, date, time, description, store)
+       VALUES
+        (25, '2024-06-01', '14:32', '__imp_existing_same_time__', 'ACME Store'),
+        (30, '2024-06-01', '09:00', '__imp_existing_different_time__', 'Coffee Bar')`
+    );
+    mockCreate.mockResolvedValue({
+      choices: [
+        {
+          message: {
+            content: JSON.stringify({
+              movements: [
+                { amount: 25, date: '2024-06-01', store: 'acme store', time: '14:32' },
+                { amount: 30, date: '2024-06-01', store: 'Coffee Bar', time: '10:00' },
+              ],
+            }),
+          },
+        },
+      ],
+    });
+
+    const res = await request(app)
+      .post('/api/import/extract')
+      .attach('file', Buffer.from('fake-jpeg'), {
+        filename: '__imp_existing_duplicates.jpg',
+        contentType: 'image/jpeg',
+      });
+
+    expect(res.status).toBe(200);
+    expect(res.body.movements[0]).toMatchObject({
+      possibleDuplicate: true,
+      duplicateOf: {
+        date: '2024-06-01',
+        time: '14:32',
+        description: '__imp_existing_same_time__',
+      },
+    });
+    expect(res.body.movements[0].duplicateOf.id).toEqual(expect.any(Number));
+    expect(res.body.movements[1].possibleDuplicate).toBe(false);
+    expect(res.body.movements[1].duplicateOf).toBeNull();
+  });
+
+  it('200: flags later duplicates within the same extraction batch', async () => {
+    mockCreate.mockResolvedValue({
+      choices: [
+        {
+          message: {
+            content: JSON.stringify({
+              movements: [
+                { amount: 18, date: '2024-06-01', store: 'Batch Store', time: '08:00' },
+                { amount: 18, date: '2024-06-01', store: 'batch store', time: '08:00' },
+              ],
+            }),
+          },
+        },
+      ],
+    });
+
+    const res = await request(app)
+      .post('/api/import/extract')
+      .attach('file', Buffer.from('fake-jpeg'), {
+        filename: '__imp_batch_duplicates.jpg',
+        contentType: 'image/jpeg',
+      });
+
+    expect(res.status).toBe(200);
+    expect(res.body.movements[0].possibleDuplicate).toBe(false);
+    expect(res.body.movements[1]).toMatchObject({
+      possibleDuplicate: true,
+      duplicateOf: {
+        id: null,
+        date: '2024-06-01',
+        time: '08:00',
+        description: null,
+      },
+    });
   });
 
   it('200: sets aiSuggested=false when no category matches', async () => {
@@ -318,6 +436,7 @@ describe('POST /api/import/confirm', () => {
   });
 
   afterAll(async () => {
+    await pool.query(`DELETE FROM gmail_imported_messages WHERE gmail_message_id LIKE '__conf_%'`);
     await pool.query(`DELETE FROM movements WHERE description LIKE '__conf_%'`);
     await pool.query(`DELETE FROM attachments WHERE file_name LIKE '__conf_%'`);
     await pool.end();
@@ -493,5 +612,178 @@ describe('POST /api/import/confirm', () => {
     );
     expect(row.rows[0].category_id).toBe(categoryId);
     expect(row.rows[0].store).toBe('Supermarket');
+  });
+
+  it('201: writes gmail imported-message log rows in the same transaction', async () => {
+    const res = await request(app)
+      .post('/api/import/confirm')
+      .send({
+        movements: [
+          {
+            amount: 32.10,
+            date: '2024-06-03',
+            description: '__conf_gmail_logged',
+            gmail_message_id: '__conf_gmail_logged_msg',
+          },
+        ],
+      });
+
+    expect(res.status).toBe(201);
+    const createdId = res.body.created[0].id;
+
+    const rows = await pool.query<{ gmail_message_id: string; movement_id: number }>(
+      `SELECT gmail_message_id, movement_id
+       FROM gmail_imported_messages
+       WHERE gmail_message_id = $1`,
+      ['__conf_gmail_logged_msg']
+    );
+    expect(rows.rows).toEqual([
+      { gmail_message_id: '__conf_gmail_logged_msg', movement_id: createdId },
+    ]);
+  });
+
+  it('400: rolls back gmail imported-message log rows when another item is invalid', async () => {
+    const before = await pool.query<{ c: string }>(
+      `SELECT COUNT(*)::text AS c
+       FROM gmail_imported_messages
+       WHERE gmail_message_id = $1`,
+      ['__conf_gmail_rollback_msg']
+    );
+
+    const res = await request(app)
+      .post('/api/import/confirm')
+      .send({
+        movements: [
+          {
+            amount: 11,
+            date: '2024-06-03',
+            description: '__conf_gmail_rollback_good',
+            gmail_message_id: '__conf_gmail_rollback_msg',
+          },
+          {
+            amount: 12,
+            date: '2024-06-03',
+            description: '__conf_gmail_rollback_bad',
+            category_id: 999999,
+          },
+        ],
+      });
+
+    expect(res.status).toBe(400);
+
+    const after = await pool.query<{ c: string }>(
+      `SELECT COUNT(*)::text AS c
+       FROM gmail_imported_messages
+       WHERE gmail_message_id = $1`,
+      ['__conf_gmail_rollback_msg']
+    );
+    expect(after.rows[0].c).toBe(before.rows[0].c);
+  });
+
+  it('409: rejects re-confirming a previously imported gmail message id without persisting', async () => {
+    const first = await request(app)
+      .post('/api/import/confirm')
+      .send({
+        movements: [
+          {
+            amount: 20,
+            date: '2024-06-04',
+            description: '__conf_gmail_original',
+            gmail_message_id: '__conf_gmail_dupe_msg',
+          },
+        ],
+      });
+    expect(first.status).toBe(201);
+
+    const countBefore = (await pool.query<{ c: string }>(
+      `SELECT COUNT(*)::text AS c FROM movements WHERE description = $1`,
+      ['__conf_gmail_duplicate_attempt']
+    )).rows[0].c;
+
+    const duplicate = await request(app)
+      .post('/api/import/confirm')
+      .send({
+        movements: [
+          {
+            amount: 20,
+            date: '2024-06-04',
+            description: '__conf_gmail_duplicate_attempt',
+            gmail_message_id: '__conf_gmail_dupe_msg',
+          },
+        ],
+      });
+
+    expect(duplicate.status).toBe(409);
+    expect(duplicate.body).toEqual({
+      error: 'One or more Gmail messages were already imported',
+      details: { alreadyImported: ['__conf_gmail_dupe_msg'] },
+    });
+
+    const countAfter = (await pool.query<{ c: string }>(
+      `SELECT COUNT(*)::text AS c FROM movements WHERE description = $1`,
+      ['__conf_gmail_duplicate_attempt']
+    )).rows[0].c;
+    expect(countAfter).toBe(countBefore);
+  });
+
+  it('201: allows multiple movements from the same gmail message in one confirm batch', async () => {
+    const res = await request(app)
+      .post('/api/import/confirm')
+      .send({
+        movements: [
+          {
+            amount: 4,
+            date: '2024-06-05',
+            description: '__conf_gmail_multi_a',
+            gmail_message_id: '__conf_gmail_multi_msg',
+          },
+          {
+            amount: 5,
+            date: '2024-06-05',
+            description: '__conf_gmail_multi_b',
+            gmail_message_id: '__conf_gmail_multi_msg',
+          },
+        ],
+      });
+
+    expect(res.status).toBe(201);
+    expect(res.body.count).toBe(2);
+
+    const rows = await pool.query<{ movement_id: number }>(
+      `SELECT movement_id
+       FROM gmail_imported_messages
+       WHERE gmail_message_id = $1
+       ORDER BY movement_id`,
+      ['__conf_gmail_multi_msg']
+    );
+    expect(rows.rows.map((row) => row.movement_id)).toEqual(
+      res.body.created.map((movement: { id: number }) => movement.id).sort((a: number, b: number) => a - b)
+    );
+  });
+
+  it('keeps the imported mark when the movement is deleted', async () => {
+    const res = await request(app)
+      .post('/api/import/confirm')
+      .send({
+        movements: [
+          {
+            amount: 8,
+            date: '2024-06-06',
+            description: '__conf_gmail_delete_preserve',
+            gmail_message_id: '__conf_gmail_delete_msg',
+          },
+        ],
+      });
+    expect(res.status).toBe(201);
+
+    await pool.query('DELETE FROM movements WHERE id = $1', [res.body.created[0].id]);
+
+    const rows = await pool.query<{ movement_id: number | null }>(
+      `SELECT movement_id
+       FROM gmail_imported_messages
+       WHERE gmail_message_id = $1`,
+      ['__conf_gmail_delete_msg']
+    );
+    expect(rows.rows).toEqual([{ movement_id: null }]);
   });
 });

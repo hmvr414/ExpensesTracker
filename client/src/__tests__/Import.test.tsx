@@ -7,11 +7,13 @@ import * as importApi from '../api/import';
 import * as categoriesApi from '../api/categories';
 import * as paymentMethodsApi from '../api/paymentMethods';
 import * as suggestApi from '../api/suggest';
+import * as gmailApi from '../api/gmail';
 
 vi.mock('../api/import');
 vi.mock('../api/categories');
 vi.mock('../api/suggest');
 vi.mock('../api/paymentMethods');
+vi.mock('../api/gmail');
 
 const mockCategories: categoriesApi.Category[] = [
   { id: 1, name: 'Food', color: '#ef4444', icon: null, movement_count: 5, created_at: '2026-01-01T00:00:00Z' },
@@ -87,6 +89,59 @@ const mockConfirmResponse: importApi.ConfirmResponse = {
 
 const mockFile = new File(['mock content'], 'receipt.jpg', { type: 'image/jpeg' });
 
+const mockSenders: gmailApi.GmailSender[] = [
+  {
+    id: 1,
+    email: 'alerts@davibank.com',
+    label: 'DAVIbank alerts',
+    subject_contains: 'Alerta de compra',
+    created_at: '2026-06-01T00:00:00Z',
+  },
+];
+
+const mockMessages: gmailApi.GmailMessage[] = [
+  {
+    id: 'gmail-1',
+    threadId: 'thread-1',
+    from: 'alerts@davibank.com',
+    subject: 'Alerta de compra',
+    date: '2026-06-10T15:30:00Z',
+    snippet: 'Compra por $15.99 en ACME Store',
+    alreadyImported: false,
+  },
+  {
+    id: 'gmail-2',
+    threadId: 'thread-2',
+    from: 'alerts@davibank.com',
+    subject: 'Alerta de compra',
+    date: '2026-06-09T12:00:00Z',
+    snippet: 'Compra por $25.00 en Coffee Bar',
+    alreadyImported: true,
+  },
+];
+
+const mockPendingEmail: gmailApi.GmailPendingEmail = {
+  messageId: 'pending-1',
+  from: 'alerts@davibank.com',
+  subject: 'Alerta de compra pendiente',
+  date: '2026-06-11T14:30:00Z',
+  status: 'pending',
+  error: null,
+  detectedAt: '2026-06-11T14:35:00Z',
+  extractedAt: '2026-06-11T14:36:00Z',
+  movements: [
+    {
+      ...mockExtractResponse.movements[0],
+      amount: 42.5,
+      date: '2026-06-11',
+      store: 'Pending Store',
+      description: 'Pending purchase',
+      gmailMessageId: 'pending-1',
+      source: 'gmail',
+    },
+  ],
+};
+
 function renderImport() {
   return render(
     <MemoryRouter>
@@ -100,7 +155,478 @@ describe('Import page', () => {
     vi.clearAllMocks();
     vi.mocked(categoriesApi.getCategories).mockResolvedValue(mockCategories);
     vi.mocked(paymentMethodsApi.getPaymentMethods).mockResolvedValue(mockPaymentMethods);
+    vi.mocked(gmailApi.getGmailStatus).mockResolvedValue({
+      connected: true,
+      email: 'me@example.com',
+      connectedAt: '2026-06-01T00:00:00Z',
+    });
+    vi.mocked(gmailApi.getGmailSenders).mockResolvedValue(mockSenders);
+    vi.mocked(gmailApi.getGmailMessages).mockResolvedValue({
+      messages: mockMessages,
+      nextPageToken: null,
+    });
+    vi.mocked(gmailApi.getGmailPending).mockImplementation(async (status = 'pending') => ({
+      emails: status === 'pending' ? [mockPendingEmail] : [],
+    }));
+    vi.mocked(gmailApi.dismissGmailPending).mockResolvedValue();
+    vi.mocked(gmailApi.retryGmailPending).mockResolvedValue({ newEmails: 1, errors: 0 });
+    vi.mocked(gmailApi.pollGmailNow).mockResolvedValue({ newEmails: 1, errors: 0 });
+    vi.mocked(gmailApi.requestGmailPendingRefresh).mockImplementation(() => {});
+    vi.mocked(importApi.extractFromEmails).mockResolvedValue({
+      emails: [
+        {
+          messageId: 'gmail-1',
+          subject: 'Alerta de compra',
+          from: 'alerts@davibank.com',
+          date: '2026-06-10T15:30:00Z',
+          movements: [mockExtractResponse.movements[0]],
+          error: null,
+        },
+      ],
+      language: 'es',
+    });
     globalThis.URL.createObjectURL = vi.fn(() => 'blob:mock-url');
+  });
+
+  describe('Gmail picker', () => {
+    it('renders source tabs and keeps the upload flow as the default', () => {
+      renderImport();
+      expect(screen.getByRole('tab', { name: /upload receipt/i })).toHaveAttribute('aria-selected', 'true');
+      expect(screen.getByRole('tab', { name: /from gmail/i })).toHaveAttribute('aria-selected', 'false');
+      expect(screen.getByTestId('dropzone')).toBeInTheDocument();
+    });
+
+    it('guards the Gmail tab when Gmail is not connected', async () => {
+      vi.mocked(gmailApi.getGmailStatus).mockResolvedValue({ connected: false, email: null, connectedAt: null });
+      renderImport();
+      await userEvent.click(screen.getByRole('tab', { name: /from gmail/i }));
+      expect(await screen.findByRole('heading', { name: /connect gmail/i })).toBeInTheDocument();
+      expect(screen.getByRole('link', { name: /connect gmail/i })).toHaveAttribute('href', '/settings/gmail');
+      expect(gmailApi.getGmailMessages).not.toHaveBeenCalled();
+    });
+
+    it('guards the Gmail tab when no sender filters are configured', async () => {
+      vi.mocked(gmailApi.getGmailSenders).mockResolvedValue([]);
+      renderImport();
+      await userEvent.click(screen.getByRole('tab', { name: /from gmail/i }));
+      expect(await screen.findByText(/add the addresses your bank sends purchase alerts from/i)).toBeInTheDocument();
+      expect(screen.getByRole('link', { name: /configure senders/i })).toHaveAttribute('href', '/settings/gmail');
+    });
+
+    it('lists Gmail messages with imported rows disabled', async () => {
+      renderImport();
+      await userEvent.click(screen.getByRole('tab', { name: /from gmail/i }));
+      expect(await screen.findAllByText('Alerta de compra')).toHaveLength(2);
+      expect(screen.getByText(/compra por \$15.99/i)).toBeInTheDocument();
+      expect(screen.getByText('Imported')).toBeInTheDocument();
+      expect(screen.getByRole('checkbox', { name: /select email gmail-2/i })).toBeDisabled();
+    });
+
+    it('passes filters and appends the next page when loading more', async () => {
+      vi.mocked(gmailApi.getGmailMessages)
+        .mockResolvedValueOnce({ messages: [mockMessages[0]], nextPageToken: 'page-2' })
+        .mockResolvedValueOnce({
+          messages: [{ ...mockMessages[1], alreadyImported: false }],
+          nextPageToken: null,
+        })
+        .mockResolvedValueOnce({
+          messages: [{ ...mockMessages[1], alreadyImported: false }],
+          nextPageToken: null,
+        })
+        .mockResolvedValue({ messages: [mockMessages[0]], nextPageToken: null });
+      renderImport();
+      await userEvent.click(screen.getByRole('tab', { name: /from gmail/i }));
+      await screen.findByText(/compra por \$15.99/i);
+      await userEvent.click(screen.getByRole('button', { name: /load more/i }));
+      await waitFor(() => {
+        expect(gmailApi.getGmailMessages).toHaveBeenLastCalledWith(
+          expect.objectContaining({ pageToken: 'page-2' })
+        );
+      });
+      expect(await screen.findByText(/coffee bar/i)).toBeInTheDocument();
+      await userEvent.selectOptions(screen.getByRole('combobox', { name: /sender/i }), 'alerts@davibank.com');
+      await userEvent.type(screen.getByRole('searchbox', { name: /subject/i }), 'compra');
+      await waitFor(() => {
+        expect(gmailApi.getGmailMessages).toHaveBeenLastCalledWith(
+          expect.objectContaining({ sender: 'alerts@davibank.com', subject: 'compra' })
+        );
+      });
+    });
+
+    it('caps selection at 25 messages', async () => {
+      const manyMessages = Array.from({ length: 26 }, (_, index) => ({
+        ...mockMessages[0],
+        id: `gmail-${index + 1}`,
+        threadId: `thread-${index + 1}`,
+        snippet: `Message ${index + 1}`,
+      }));
+      vi.mocked(gmailApi.getGmailMessages).mockResolvedValue({ messages: manyMessages, nextPageToken: null });
+      renderImport();
+      await userEvent.click(screen.getByRole('tab', { name: /from gmail/i }));
+      const boxes = await screen.findAllByRole('checkbox', { name: /select email/i });
+      for (const box of boxes.slice(0, 25)) {
+        await userEvent.click(box);
+      }
+      expect(screen.getByText('25 / 25 selected')).toBeInTheDocument();
+      expect(boxes[25]).toBeDisabled();
+    });
+
+    it('extracts selected emails and feeds movements into the existing review table', async () => {
+      renderImport();
+      await userEvent.click(screen.getByRole('tab', { name: /from gmail/i }));
+      await userEvent.click(await screen.findByRole('checkbox', { name: /select email gmail-1/i }));
+      await userEvent.click(screen.getByRole('button', { name: /extract 1 email/i }));
+      await waitFor(() => {
+        expect(importApi.extractFromEmails).toHaveBeenCalledWith(['gmail-1']);
+      });
+      expect(await screen.findByTestId('movements-table')).toBeInTheDocument();
+      expect(screen.getByDisplayValue('ACME Store')).toBeInTheDocument();
+    });
+
+    it('shows pending cards and reviews stored movements without re-extraction', async () => {
+      renderImport();
+      await userEvent.click(screen.getByRole('tab', { name: /from gmail/i }));
+      expect(await screen.findByText('Alerta de compra pendiente')).toBeInTheDocument();
+      expect(screen.getByText(/pending store — \$42.50 — 2026-06-11/i)).toBeInTheDocument();
+      await userEvent.click(screen.getByRole('checkbox', { name: /select pending email pending-1/i }));
+      await userEvent.click(screen.getByRole('button', { name: /review 1 email/i }));
+      expect(await screen.findByTestId('movements-table')).toBeInTheDocument();
+      expect(screen.getByDisplayValue('Pending Store')).toBeInTheDocument();
+      expect(importApi.extractFromEmails).not.toHaveBeenCalled();
+    });
+
+    it('dismisses a pending card and refreshes the notification badge', async () => {
+      vi.spyOn(window, 'confirm').mockReturnValue(true);
+      renderImport();
+      await userEvent.click(screen.getByRole('tab', { name: /from gmail/i }));
+      expect(await screen.findByText('Alerta de compra pendiente')).toBeInTheDocument();
+      await userEvent.click(screen.getByRole('button', { name: /dismiss pending-1/i }));
+      await waitFor(() => {
+        expect(gmailApi.dismissGmailPending).toHaveBeenCalledWith('pending-1');
+      });
+      expect(gmailApi.requestGmailPendingRefresh).toHaveBeenCalled();
+      expect(screen.queryByText('Alerta de compra pendiente')).not.toBeInTheDocument();
+    });
+
+    it('renders error pending cards and retries them', async () => {
+      vi.mocked(gmailApi.getGmailPending).mockImplementation(async (status = 'pending') => ({
+        emails:
+          status === 'error'
+            ? [
+                {
+                  ...mockPendingEmail,
+                  messageId: 'error-1',
+                  status: 'error',
+                  subject: 'Broken alert',
+                  movements: [],
+                  error: 'Model failed',
+                },
+              ]
+            : [],
+      }));
+      renderImport();
+      await userEvent.click(screen.getByRole('tab', { name: /from gmail/i }));
+      expect(await screen.findByText('Broken alert')).toBeInTheDocument();
+      expect(screen.getByText('Model failed')).toBeInTheDocument();
+      await userEvent.click(screen.getByRole('button', { name: /^retry$/i }));
+      await waitFor(() => {
+        expect(gmailApi.retryGmailPending).toHaveBeenCalledWith('error-1');
+      });
+    });
+
+    it('checks Gmail now and updates the last checked readout', async () => {
+      vi.mocked(gmailApi.getGmailStatus)
+        .mockResolvedValueOnce({
+          connected: true,
+          email: 'me@example.com',
+          connectedAt: '2026-06-01T00:00:00Z',
+          lastPolledAt: null,
+        })
+        .mockResolvedValueOnce({
+          connected: true,
+          email: 'me@example.com',
+          connectedAt: '2026-06-01T00:00:00Z',
+          lastPolledAt: '2026-06-12T10:00:00Z',
+        });
+      renderImport();
+      await userEvent.click(screen.getByRole('tab', { name: /from gmail/i }));
+      expect(await screen.findByText(/last checked: never/i)).toBeInTheDocument();
+      await userEvent.click(screen.getByRole('button', { name: /check now/i }));
+      await waitFor(() => {
+        expect(gmailApi.pollGmailNow).toHaveBeenCalled();
+      });
+      expect(await screen.findByText(/last checked:/i)).toHaveTextContent('2026');
+    });
+
+    it('renders per-email extraction errors and retries a single message', async () => {
+      vi.mocked(importApi.extractFromEmails)
+        .mockResolvedValueOnce({
+          emails: [
+            {
+              messageId: 'gmail-1',
+              subject: 'Alerta de compra',
+              from: 'alerts@davibank.com',
+              date: '2026-06-10T15:30:00Z',
+              movements: [],
+              error: 'Model failed',
+            },
+          ],
+          language: 'es',
+        })
+        .mockResolvedValueOnce({
+          emails: [
+            {
+              messageId: 'gmail-1',
+              subject: 'Alerta de compra',
+              from: 'alerts@davibank.com',
+              date: '2026-06-10T15:30:00Z',
+              movements: [mockExtractResponse.movements[0]],
+              error: null,
+            },
+          ],
+          language: 'es',
+        });
+      renderImport();
+      await userEvent.click(screen.getByRole('tab', { name: /from gmail/i }));
+      await userEvent.click(await screen.findByRole('checkbox', { name: /select email gmail-1/i }));
+      await userEvent.click(screen.getByRole('button', { name: /extract 1 email/i }));
+      expect(await screen.findByText(/model failed/i)).toBeInTheDocument();
+      await userEvent.click(screen.getByRole('button', { name: /retry/i }));
+      await waitFor(() => {
+        expect(importApi.extractFromEmails).toHaveBeenLastCalledWith(['gmail-1']);
+      });
+      expect(await screen.findByTestId('movements-table')).toBeInTheDocument();
+      expect(screen.getByDisplayValue('ACME Store')).toBeInTheDocument();
+    });
+
+    it('shows mixed extraction errors above review rows and retries without disturbing extracted rows', async () => {
+      vi.mocked(importApi.extractFromEmails)
+        .mockResolvedValueOnce({
+          emails: [
+            {
+              messageId: 'gmail-1',
+              subject: 'Alerta de compra',
+              from: 'alerts@davibank.com',
+              date: '2026-06-10T15:30:00Z',
+              movements: [mockExtractResponse.movements[0]],
+              error: null,
+            },
+            {
+              messageId: 'gmail-3',
+              subject: 'Alerta de compra',
+              from: 'alerts@davibank.com',
+              date: '2026-06-10T16:00:00Z',
+              movements: [],
+              error: 'Fetch failed',
+            },
+          ],
+          language: 'es',
+        })
+        .mockResolvedValueOnce({
+          emails: [
+            {
+              messageId: 'gmail-3',
+              subject: 'Alerta de compra',
+              from: 'alerts@davibank.com',
+              date: '2026-06-10T16:00:00Z',
+              movements: [{ ...mockExtractResponse.movements[0], store: 'Coffee Bar' }],
+              error: null,
+            },
+          ],
+          language: 'es',
+        });
+      vi.mocked(gmailApi.getGmailMessages).mockResolvedValue({
+        messages: [
+          mockMessages[0],
+          {
+            ...mockMessages[0],
+            id: 'gmail-3',
+            threadId: 'thread-3',
+            snippet: 'Compra por $8.00 en Coffee Bar',
+          },
+        ],
+        nextPageToken: null,
+      });
+      renderImport();
+      await userEvent.click(screen.getByRole('tab', { name: /from gmail/i }));
+      await userEvent.click(await screen.findByRole('checkbox', { name: /select email gmail-1/i }));
+      await userEvent.click(screen.getByRole('checkbox', { name: /select email gmail-3/i }));
+      await userEvent.click(screen.getByRole('button', { name: /extract 2 emails/i }));
+      expect(await screen.findByText(/fetch failed/i)).toBeInTheDocument();
+      expect(screen.getByTestId('movements-table')).toBeInTheDocument();
+      expect(screen.getByDisplayValue('ACME Store')).toBeInTheDocument();
+      await userEvent.click(screen.getByRole('button', { name: /retry/i }));
+      expect(await screen.findByTestId('movements-table')).toBeInTheDocument();
+      expect(screen.getByDisplayValue('ACME Store')).toBeInTheDocument();
+      expect(screen.getByDisplayValue('Coffee Bar')).toBeInTheDocument();
+    });
+  });
+
+  describe('Gmail review and confirm', () => {
+    async function goToGmailReview() {
+      renderImport();
+      await userEvent.click(screen.getByRole('tab', { name: /from gmail/i }));
+      await userEvent.click(await screen.findByRole('checkbox', { name: /select email gmail-1/i }));
+      await userEvent.click(screen.getByRole('button', { name: /extract 1 email/i }));
+      await waitFor(() => {
+        expect(screen.getByTestId('movements-table')).toBeInTheDocument();
+      });
+    }
+
+    it('shows a Source column with the email subject and a from/date tooltip for gmail rows', async () => {
+      await goToGmailReview();
+      expect(screen.getByText('Source')).toBeInTheDocument();
+      const cell = screen.getByTestId('source-cell');
+      expect(cell).toHaveTextContent('Alerta de compra');
+      expect(cell.title).toContain('alerts@davibank.com');
+    });
+
+    it('hides the Source column entirely for upload imports', async () => {
+      vi.mocked(importApi.extractFromImage).mockResolvedValue(mockExtractResponse);
+      renderImport();
+      await userEvent.upload(screen.getByTestId('file-input'), mockFile);
+      fireEvent.click(screen.getByTestId('process-button'));
+      await waitFor(() => {
+        expect(screen.getByTestId('movements-table')).toBeInTheDocument();
+      });
+      expect(screen.queryByText('Source')).not.toBeInTheDocument();
+      expect(screen.queryByTestId('source-cell')).not.toBeInTheDocument();
+    });
+
+    it('includes each row gmail_message_id in the confirm payload', async () => {
+      vi.mocked(importApi.confirmImport).mockResolvedValue(mockConfirmResponse);
+      await goToGmailReview();
+      fireEvent.click(screen.getByTestId('import-button'));
+      await waitFor(() => {
+        expect(importApi.confirmImport).toHaveBeenCalledWith({
+          attachmentId: undefined,
+          movements: [expect.objectContaining({ gmail_message_id: 'gmail-1' })],
+        });
+      });
+    });
+
+    it('marks conflicting rows on 409 and confirms the remaining rows without re-extracting', async () => {
+      vi.mocked(gmailApi.getGmailMessages).mockResolvedValue({
+        messages: [
+          mockMessages[0],
+          { ...mockMessages[0], id: 'gmail-3', threadId: 'thread-3', snippet: 'Compra por $8.00 en Coffee Bar' },
+        ],
+        nextPageToken: null,
+      });
+      vi.mocked(importApi.extractFromEmails).mockResolvedValue({
+        emails: [
+          {
+            messageId: 'gmail-1',
+            subject: 'Alerta de compra',
+            from: 'alerts@davibank.com',
+            date: '2026-06-10T15:30:00Z',
+            movements: [mockExtractResponse.movements[0]],
+            error: null,
+          },
+          {
+            messageId: 'gmail-3',
+            subject: 'Alerta de compra',
+            from: 'alerts@davibank.com',
+            date: '2026-06-10T16:00:00Z',
+            movements: [{ ...mockExtractResponse.movements[0], store: 'Coffee Bar' }],
+            error: null,
+          },
+        ],
+        language: 'es',
+      });
+      vi.mocked(importApi.confirmImport)
+        .mockRejectedValueOnce({
+          isAxiosError: true,
+          response: {
+            status: 409,
+            data: {
+              error: 'Some emails were already imported',
+              details: { alreadyImported: ['gmail-1'] },
+            },
+          },
+        })
+        .mockResolvedValueOnce(mockConfirmResponse);
+      renderImport();
+      await userEvent.click(screen.getByRole('tab', { name: /from gmail/i }));
+      await userEvent.click(await screen.findByRole('checkbox', { name: /select email gmail-1/i }));
+      await userEvent.click(screen.getByRole('checkbox', { name: /select email gmail-3/i }));
+      await userEvent.click(screen.getByRole('button', { name: /extract 2 emails/i }));
+      await waitFor(() => {
+        expect(screen.getByTestId('movements-table')).toBeInTheDocument();
+      });
+      fireEvent.click(screen.getByTestId('import-button'));
+      expect(await screen.findByTestId('already-imported-badge')).toHaveTextContent(/already imported/i);
+      expect(screen.getByTestId('import-button')).toHaveTextContent('Import 1 Movement');
+      fireEvent.click(screen.getByTestId('import-button'));
+      await waitFor(() => {
+        expect(importApi.confirmImport).toHaveBeenLastCalledWith({
+          attachmentId: undefined,
+          movements: [
+            expect.objectContaining({ gmail_message_id: 'gmail-3', store: 'Coffee Bar' }),
+          ],
+        });
+      });
+      expect(await screen.findByTestId('success-summary')).toBeInTheDocument();
+    });
+
+    it('shows a friendly empty state with a back-to-list action when no movements are found', async () => {
+      vi.mocked(importApi.extractFromEmails).mockResolvedValue({
+        emails: [
+          {
+            messageId: 'gmail-1',
+            subject: 'Alerta de compra',
+            from: 'alerts@davibank.com',
+            date: '2026-06-10T15:30:00Z',
+            movements: [],
+            error: null,
+          },
+        ],
+        language: 'es',
+      });
+      renderImport();
+      await userEvent.click(screen.getByRole('tab', { name: /from gmail/i }));
+      await userEvent.click(await screen.findByRole('checkbox', { name: /select email gmail-1/i }));
+      await userEvent.click(screen.getByRole('button', { name: /extract 1 email/i }));
+      expect(await screen.findByText(/no movements found in the selected emails/i)).toBeInTheDocument();
+      await userEvent.click(screen.getByRole('button', { name: /back to email list/i }));
+      expect(await screen.findByRole('checkbox', { name: /select email gmail-1/i })).toBeInTheDocument();
+    });
+
+    it('reports imported emails in the success summary and refreshes badges without a reload', async () => {
+      vi.mocked(importApi.confirmImport).mockResolvedValue(mockConfirmResponse);
+      await goToGmailReview();
+      const listCalls = vi.mocked(gmailApi.getGmailMessages).mock.calls.length;
+      fireEvent.click(screen.getByTestId('import-button'));
+      await waitFor(() => {
+        expect(screen.getByTestId('success-summary')).toBeInTheDocument();
+      });
+      expect(screen.getByTestId('imported-emails-summary')).toHaveTextContent(
+        '1 email marked as imported'
+      );
+      expect(gmailApi.requestGmailPendingRefresh).toHaveBeenCalled();
+      await userEvent.click(screen.getByRole('button', { name: /back to gmail emails/i }));
+      const checkbox = await screen.findByRole('checkbox', { name: /select email gmail-1/i });
+      expect(checkbox).toBeDisabled();
+      expect(screen.getAllByText('Imported')).toHaveLength(2);
+      expect(vi.mocked(gmailApi.getGmailMessages).mock.calls.length).toBe(listCalls);
+    });
+
+    it('omits the imported-emails line for upload-sourced confirms', async () => {
+      vi.mocked(importApi.extractFromImage).mockResolvedValue(mockExtractResponse);
+      vi.mocked(importApi.confirmImport).mockResolvedValue(mockConfirmResponse);
+      renderImport();
+      await userEvent.upload(screen.getByTestId('file-input'), mockFile);
+      fireEvent.click(screen.getByTestId('process-button'));
+      await waitFor(() => {
+        expect(screen.getByTestId('movements-table')).toBeInTheDocument();
+      });
+      fireEvent.click(screen.getByTestId('import-button'));
+      await waitFor(() => {
+        expect(screen.getByTestId('success-summary')).toBeInTheDocument();
+      });
+      expect(screen.queryByTestId('imported-emails-summary')).not.toBeInTheDocument();
+      expect(screen.queryByRole('button', { name: /back to gmail emails/i })).not.toBeInTheDocument();
+    });
   });
 
   describe('Upload step', () => {
@@ -221,6 +747,60 @@ describe('Import page', () => {
       await userEvent.clear(amountInput);
       await userEvent.type(amountInput, '25');
       expect(amountInput).toHaveValue(25);
+    });
+
+    it('shows and submits extracted movement time from the review table', async () => {
+      vi.mocked(importApi.extractFromImage).mockResolvedValue({
+        ...mockExtractResponse,
+        movements: [{ ...mockExtractResponse.movements[0], time: '14:32' }],
+      });
+      vi.mocked(importApi.confirmImport).mockResolvedValue(mockConfirmResponse);
+      renderImport();
+      await userEvent.upload(screen.getByTestId('file-input'), mockFile);
+      fireEvent.click(screen.getByTestId('process-button'));
+      await waitFor(() => {
+        expect(screen.getByTestId('movements-table')).toBeInTheDocument();
+      });
+      const timeInput = screen.getByLabelText(/time/i);
+      expect(timeInput).toHaveValue('14:32');
+      await userEvent.clear(timeInput);
+      await userEvent.type(timeInput, '15:45');
+      fireEvent.click(screen.getByTestId('import-button'));
+      await waitFor(() => {
+        expect(importApi.confirmImport).toHaveBeenCalledWith({
+          attachmentId: 42,
+          movements: [expect.objectContaining({ time: '15:45' })],
+        });
+      });
+    });
+
+    it('shows a possible duplicate badge without blocking import', async () => {
+      vi.mocked(importApi.extractFromImage).mockResolvedValue({
+        ...mockExtractResponse,
+        movements: [
+          {
+            ...mockExtractResponse.movements[0],
+            possibleDuplicate: true,
+            duplicateOf: {
+              id: 42,
+              date: '2026-06-09',
+              time: '14:32',
+              description: 'Groceries',
+            },
+          },
+        ],
+      });
+      vi.mocked(importApi.confirmImport).mockResolvedValue(mockConfirmResponse);
+      renderImport();
+      await userEvent.upload(screen.getByTestId('file-input'), mockFile);
+      fireEvent.click(screen.getByTestId('process-button'));
+      const badge = await screen.findByTestId('possible-duplicate-badge');
+      expect(badge).toHaveTextContent(/possible duplicate/i);
+      expect(badge.title).toContain('movement #42');
+      fireEvent.click(screen.getByTestId('import-button'));
+      await waitFor(() => {
+        expect(importApi.confirmImport).toHaveBeenCalled();
+      });
     });
   });
 

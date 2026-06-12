@@ -112,6 +112,34 @@ Copy `.env.example` to `.env` and fill in the values. See `.env.example` for des
 | `CORS_ORIGIN` | — | Production only |
 | `OPENROUTER_API_KEY` | — | Yes (AI features) |
 | `OPENROUTER_MODEL` | `anthropic/claude-haiku-4-5` | No |
+| `GOOGLE_CLIENT_ID` | — | Gmail import only |
+| `GOOGLE_CLIENT_SECRET` | — | Gmail import only |
+| `GOOGLE_REDIRECT_URI` | — | Gmail import only |
+
+## Gmail integration setup
+
+The Gmail import feature reads bank notification emails through the Gmail API
+(read-only). It needs a Google OAuth client, configured once in the
+[Google Cloud Console](https://console.cloud.google.com):
+
+1. **Create a project** (or pick an existing one).
+2. **Enable the Gmail API**: APIs & Services → Library → search "Gmail API" → Enable.
+3. **Configure the OAuth consent screen**: APIs & Services → OAuth consent screen →
+   User type "External" → fill in the app name and your email. Add the scope
+   `https://www.googleapis.com/auth/gmail.readonly`.
+4. **Create an OAuth client ID**: APIs & Services → Credentials → Create credentials →
+   OAuth client ID → Application type "Web application". Add the redirect URI —
+   for local development: `http://localhost:3000/api/gmail/oauth/callback`.
+5. **Copy the credentials to `.env`**: the client ID → `GOOGLE_CLIENT_ID`, the
+   client secret → `GOOGLE_CLIENT_SECRET`, and the redirect URI from step 4 →
+   `GOOGLE_REDIRECT_URI`.
+
+> ⚠️ **Publish the consent screen to "In production".** While the consent screen
+> is in "Testing" status, Google expires refresh tokens after **7 days**, which
+> forces you to reconnect Gmail every week. On the OAuth consent screen page,
+> click "Publish app". You do not need Google's verification for personal use —
+> when connecting, click "Advanced" → "Go to <app> (unsafe)" once on the
+> unverified-app warning.
 
 ## Scripts
 
@@ -135,4 +163,5 @@ All endpoints are prefixed with `/api`.
 | Dashboard | `GET /api/dashboard?period=month&anchor=YYYY-MM-DD` |
 | AI suggest | `POST /api/suggest/category` |
 | OCR import | `POST /api/import/extract`, `POST /api/import/confirm` |
+| Gmail | `GET /api/gmail/auth-url`, `GET /api/gmail/oauth/callback`, `GET /api/gmail/status`, `DELETE /api/gmail/connection` |
 | Health | `GET /health` |

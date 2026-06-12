@@ -9,7 +9,7 @@
       "`GET /api/gmail/status` — `{ connected: boolean, email: string | null, connectedAt: string | null }`, never returning tokens; `DELETE /api/gmail/connection` — best-effort token revocation against Google, delete the row, return 204",
       "Create `api/src/helpers/gmailClient.ts` — exported `getGmailClient()` that loads the stored credentials, transparently refreshes the access token via the refresh_token when `token_expiry` has passed (persisting the new token + expiry), and throws typed errors `GMAIL_NOT_CONNECTED` / `GMAIL_AUTH_EXPIRED` that routes map to 401-style `{ error, code }` responses; tests mock `googleapis` (no real network) covering auth-url generation, callback upsert/replace, status, disconnect, and refresh-on-expiry persistence"
     ],
-    "passes": false
+    "passes": true
   },
   {
     "category": "functional",
@@ -21,7 +21,7 @@
       "For each message in the page, return `{ id, threadId, from, subject, date, snippet, alreadyImported }` using `messages.list` plus metadata-format `messages.get` calls; `alreadyImported` is true when any `gmail_imported_messages` row exists for the message id; pass Gmail's `nextPageToken` through in the response for pagination",
       "Map Gmail auth failures (`GMAIL_NOT_CONNECTED` / `GMAIL_AUTH_EXPIRED` from the helper, or 401s from Google) to a 401 `{ error, code: 'GMAIL_RECONNECT_REQUIRED' }` the client can act on; tests mock the gmail client covering sender CRUD validation, query construction (dates, sender OR-groups with and without subject_contains, ad-hoc subject param, phrase quoting/escaping), the no-senders 400, alreadyImported annotation, and pagination passthrough"
     ],
-    "passes": false
+    "passes": true
   },
   {
     "category": "integration",
@@ -33,7 +33,7 @@
       "All existing enrichment applies identically to email text: registered payment-method matching with `detectedPaymentLabel` fallback, second-pass category suggestion with the in-process dedup cache, description sanitizer, `store_context` web enrichment, and `rawAmountText` + `amountSuspect` locale reconciliation — DAVIbank-style Spanish notifications are the primary fixture",
       "Per-email error isolation: a fetch or model failure for one message id produces `{ messageId, error }` for that entry without failing the batch; tests mock gmail + OpenRouter covering plain-text bodies, HTML-only bodies, multi-movement emails, batch isolation on one failing email, and the gmailMessageId tagging"
     ],
-    "passes": false
+    "passes": true
   },
   {
     "category": "functional",
@@ -45,7 +45,7 @@
       "Deleting a movement keeps its log row (`movement_id` becomes null via ON DELETE SET NULL) so the email stays marked imported and is not offered for re-import — deliberate; the listing endpoint's `alreadyImported` flag therefore reflects 'ever imported'",
       "Tests: confirm with gmail ids writes log rows in-transaction (rolled back together on a bad item), 409 on re-confirm of an already-imported id, multi-movement-per-email batch succeeds, movement deletion preserves the imported mark, and confirms without `gmail_message_id` (OCR flow) behave exactly as before"
     ],
-    "passes": false
+    "passes": true
   },
   {
     "category": "ui",
@@ -57,7 +57,7 @@
       "Empty/guard states: connected with zero senders shows a prompt card 'Add the addresses your bank sends purchase alerts from'; any API response with `code: 'GMAIL_RECONNECT_REQUIRED'` renders a warning banner with a Reconnect button wired to the auth-url flow",
       "Client tests (Vitest, mocked api module): status rendering in both states, connect button navigation, disconnect flow, return-param toasts, sender add/delete with validation and duplicate error, and the reconnect banner"
     ],
-    "passes": false
+    "passes": true
   },
   {
     "category": "ui",
@@ -69,7 +69,7 @@
       "Emails that return a per-email `error` render as inline error rows above the results with a per-email Retry that re-extracts only that message id, merging its movements into the pending review set without disturbing already-extracted rows",
       "Client tests: tab guards for the three connection states, imported-badge disabling, selection cap, load-more pagination, extraction call payload, and single-email retry merging"
     ],
-    "passes": false
+    "passes": true
   },
   {
     "category": "ui",
@@ -81,7 +81,7 @@
       "Handle the 409 already-imported response by marking the conflicting rows inline ('Already imported') and letting the user confirm the remaining rows without re-extracting",
       "The success summary card additionally states 'N emails marked as imported'; navigating back to the Gmail email list reflects the new Imported badges without a full page reload; client tests cover the source column, confirm payload, 409 row-marking, empty state, and badge refresh"
     ],
-    "passes": false
+    "passes": true
   },
   {
     "category": "functional",
@@ -93,7 +93,7 @@
       "Extend the `POST /api/import/confirm` `movementItemSchema` with the same optional `time` field, persisted in the bulk-insert transaction",
       "Add an optional native time input to `MovementForm.tsx` beside the date field (empty by default, pre-populated in edit mode, cleared value submits null); show 'HH:MM' beside the date on Dashboard Recent Movements rows when set; API tests cover format validation, normalization, clearing via null, and ordering; client tests cover the form round-trip and list display"
     ],
-    "passes": false
+    "passes": true
   },
   {
     "category": "integration",
@@ -105,7 +105,7 @@
       "In the import review table: an editable time input column prefilled from extraction, and a ⚠ 'Possible duplicate' badge on flagged rows with a tooltip describing the matched movement ('Looks like movement #42 — same store, amount and date'); the badge is informational only — confirmation is never blocked, and the user can deselect/remove the row instead",
       "Tests: time parsing across '14:32' / '2:32 PM' / '02:32 p. m.' / absent / malformed, duplicate flag against existing DB movements, suppression when times differ, within-batch flagging, confirm proceeding despite flags, and the review table rendering of time + badge"
     ],
-    "passes": false
+    "passes": true
   },
   {
     "category": "functional",
@@ -117,7 +117,7 @@
       "Pending-queue endpoints: `GET /api/gmail/pending` (status filter, default 'pending', rows ordered by email_date desc with parsed movements); `GET /api/gmail/pending/count` — `{ emails, movements }` for the badge; `POST /api/gmail/pending/:messageId/dismiss` → status 'dismissed' (row kept so polling never re-suggests it); `POST /api/gmail/pending/:messageId/retry` — re-extracts an 'error' row in place; `POST /api/gmail/poll-now` — runs one tick on demand and returns `{ newEmails, errors }`",
       "Integrate with confirm: `POST /api/import/confirm` deletes the pending rows of any confirmed `gmail_message_id`s inside the same transaction (`gmail_imported_messages` remains the permanent imported record); Jest tests with fake timers and mocked gmail/OpenRouter covering skip-when-disconnected, dedup against both imported and pending, error capture + retry, needs_reconnect suspension, poll-now, startup catch-up tick, and confirm clearing the queue"
     ],
-    "passes": false
+    "passes": true
   },
   {
     "category": "ui",
@@ -129,6 +129,6 @@
       "Confirming from the review table removes those emails from the pending section and refreshes the badge; a 'Check now' button triggers `POST /api/gmail/poll-now` with a spinner and a 'Last checked: …' line from `last_polled_at` (also shown on the Gmail settings page); when the API reports reconnect-required, the pending section is replaced by the existing reconnect banner",
       "Client tests: badge count and title prefix, pending cards with movement summaries, review handoff without re-extraction, dismiss and retry flows, check-now, and badge refresh after confirm"
     ],
-    "passes": false
+    "passes": true
   }
 ]

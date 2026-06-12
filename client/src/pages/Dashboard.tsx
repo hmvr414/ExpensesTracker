@@ -370,8 +370,9 @@ export function Dashboard() {
               onClick={() => openEditForm(m)}
               className="flex items-center gap-4 px-5 py-3 border-b border-neutral-50 dark:border-neutral-700/50 last:border-0 hover:bg-neutral-50 dark:hover:bg-neutral-700/30 transition-colors cursor-pointer"
             >
-              <span className="text-xs text-neutral-500 w-16 flex-shrink-0">
+              <span className="text-xs text-neutral-500 w-20 flex-shrink-0">
                 {formatDate(m.date)}
+                {m.time && <span className="block">{m.time}</span>}
               </span>
               <span className="flex-1 text-sm text-neutral-800 dark:text-neutral-200 truncate">
                 {m.store ?? m.description ?? '—'}

@@ -7,6 +7,7 @@ import {
 
 const links = [
   { to: '/', label: 'Dashboard' },
+  { to: '/movements', label: 'Movements' },
   { to: '/import', label: 'Import from Image' },
   { to: '/categories', label: 'Categories' },
   { to: '/payment-methods', label: 'Payment Methods' },

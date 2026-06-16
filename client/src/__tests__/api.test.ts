@@ -97,9 +97,40 @@ describe('movements API module', () => {
     mockedAxios.get = vi.fn().mockResolvedValueOnce({ data: { data: [], total: 0 } });
     const { getMovements } = await import('../api/movements');
     await getMovements({ from: '2026-01-01', category_id: 2, page: 1, limit: 20 });
-    expect(mockedAxios.get).toHaveBeenCalledWith('/api/movements', {
-      params: { from: '2026-01-01', category_id: 2, page: 1, limit: 20 },
-    });
+    expect(mockedAxios.get).toHaveBeenCalledWith(
+      '/api/movements',
+      expect.objectContaining({
+        params: { from: '2026-01-01', category_id: 2, page: 1, limit: 20 },
+      })
+    );
+  });
+
+  it('getMovements serializes a category_id list as repeated params', async () => {
+    mockedAxios.get = vi.fn().mockResolvedValueOnce({ data: { data: [], total: 0 } });
+    const { getMovements } = await import('../api/movements');
+    await getMovements({ category_id: [3, 7], uncategorized: true });
+    const config = mockedAxios.get.mock.calls[0][1] as {
+      params: Record<string, unknown>;
+      paramsSerializer: { serialize: (p: Record<string, unknown>) => string };
+    };
+    const serialized = config.paramsSerializer.serialize(config.params);
+    expect(serialized).toContain('category_id=3');
+    expect(serialized).toContain('category_id=7');
+    expect(serialized).toContain('uncategorized=true');
+  });
+
+  it('getMovementsSeries calls GET /api/movements/series', async () => {
+    mockedAxios.get = vi
+      .fn()
+      .mockResolvedValueOnce({ data: { granularity: 'day', data: [], comparison: {} } });
+    const { getMovementsSeries } = await import('../api/movements');
+    await getMovementsSeries({ from: '2026-01-01', to: '2026-01-31', category_id: [1, 2] });
+    expect(mockedAxios.get).toHaveBeenCalledWith(
+      '/api/movements/series',
+      expect.objectContaining({
+        params: { from: '2026-01-01', to: '2026-01-31', category_id: [1, 2] },
+      })
+    );
   });
 
   it('createMovement calls POST /api/movements', async () => {

@@ -109,6 +109,262 @@ describe('GET /api/movements', () => {
   });
 });
 
+describe('GET /api/movements — multi-category & flexible filtering', () => {
+  const { getPool, getApp } = setupSuite();
+  const STORE = '__test_feat1_store__';
+  let catA: number;
+  let catB: number;
+
+  beforeAll(async () => {
+    const pool = getPool();
+    const a = await pool.query<{ id: number }>(
+      `INSERT INTO categories (name, color) VALUES ('__test_feat1_a__', '#111111') RETURNING id`
+    );
+    catA = a.rows[0].id;
+    const b = await pool.query<{ id: number }>(
+      `INSERT INTO categories (name, color) VALUES ('__test_feat1_b__', '#222222') RETURNING id`
+    );
+    catB = b.rows[0].id;
+    // catA: 10 (02-01), 20 (02-02); catB: 30 (02-03); uncategorized: 40 (02-04)
+    await pool.query(
+      `INSERT INTO movements (amount, date, store, category_id) VALUES
+         (10, '2024-02-01', $1, $2),
+         (20, '2024-02-02', $1, $2),
+         (30, '2024-02-03', $1, $3),
+         (40, '2024-02-04', $1, NULL)`,
+      [STORE, catA, catB]
+    );
+  });
+
+  afterAll(async () => {
+    const pool = getPool();
+    await pool.query(`DELETE FROM movements WHERE store = $1`, [STORE]);
+    await pool.query(`DELETE FROM categories WHERE name LIKE '__test_feat1_%'`);
+    await pool.end();
+  });
+
+  const ids = (body: { data: { id: number }[] }) => body.data.map((m) => m.id);
+
+  it('repeated category_id produces an ANY/IN filter over multiple categories', async () => {
+    const res = await request(getApp()).get(
+      `/api/movements?store=${STORE}&category_id=${catA}&category_id=${catB}`
+    );
+    expect(res.status).toBe(200);
+    expect(res.body.total).toBe(3);
+    expect(res.body.totalAmount).toBe(60);
+    for (const m of res.body.data) {
+      expect([catA, catB]).toContain(m.category_id);
+    }
+  });
+
+  it('comma-separated category_id produces the same filter', async () => {
+    const res = await request(getApp()).get(
+      `/api/movements?store=${STORE}&category_id=${catA},${catB}`
+    );
+    expect(res.status).toBe(200);
+    expect(res.body.total).toBe(3);
+    expect(res.body.totalAmount).toBe(60);
+  });
+
+  it('single category_id stays backward-compatible', async () => {
+    const res = await request(getApp()).get(`/api/movements?store=${STORE}&category_id=${catA}`);
+    expect(res.status).toBe(200);
+    expect(res.body.total).toBe(2);
+    expect(res.body.totalAmount).toBe(30);
+    for (const m of res.body.data) {
+      expect(m.category_id).toBe(catA);
+    }
+  });
+
+  it('uncategorized=true alone filters to category_id IS NULL', async () => {
+    const res = await request(getApp()).get(`/api/movements?store=${STORE}&uncategorized=true`);
+    expect(res.status).toBe(200);
+    expect(res.body.total).toBe(1);
+    expect(res.body.totalAmount).toBe(40);
+    expect(res.body.data[0].category_id).toBeNull();
+  });
+
+  it('uncategorized combined with ids widens to (ANY OR IS NULL)', async () => {
+    const res = await request(getApp()).get(
+      `/api/movements?store=${STORE}&category_id=${catA}&uncategorized=true`
+    );
+    expect(res.status).toBe(200);
+    expect(res.body.total).toBe(3); // catA's two + the null one
+    expect(res.body.totalAmount).toBe(70);
+  });
+
+  it('totalAmount is the full-set sum, independent of limit/page', async () => {
+    const res = await request(getApp()).get(`/api/movements?store=${STORE}&limit=2`);
+    expect(res.status).toBe(200);
+    expect(res.body.total).toBe(4);
+    expect(res.body.data.length).toBe(2);
+    expect(res.body.totalAmount).toBe(100); // 10+20+30+40
+
+    const res2 = await request(getApp()).get(`/api/movements?store=${STORE}&limit=2&page=2`);
+    expect(res2.body.totalAmount).toBe(100);
+  });
+
+  it('category filter composes with from/to', async () => {
+    const res = await request(getApp()).get(
+      `/api/movements?store=${STORE}&category_id=${catA},${catB}&from=2024-02-01&to=2024-02-02`
+    );
+    expect(res.status).toBe(200);
+    expect(res.body.total).toBe(2);
+    expect(res.body.totalAmount).toBe(30);
+  });
+
+  it('invalid category tokens are ignored rather than 400-ing', async () => {
+    const res = await request(getApp()).get(
+      `/api/movements?store=${STORE}&category_id=abc,${catA},-5,0`
+    );
+    expect(res.status).toBe(200);
+    expect(res.body.total).toBe(2); // resolves to just catA
+    expect(ids(res.body)).toHaveLength(2);
+  });
+
+  it('all-invalid category tokens leave the result unfiltered by category', async () => {
+    const res = await request(getApp()).get(`/api/movements?store=${STORE}&category_id=abc,-1,0`);
+    expect(res.status).toBe(200);
+    expect(res.body.total).toBe(4);
+  });
+
+  it('limit can go up to 200 and clamps above that', async () => {
+    const res = await request(getApp()).get(`/api/movements?limit=200`);
+    expect(res.body.limit).toBe(200);
+    const res2 = await request(getApp()).get(`/api/movements?limit=500`);
+    expect(res2.body.limit).toBe(200);
+  });
+
+  it('totalAmount is a number on the unfiltered list', async () => {
+    const res = await request(getApp()).get('/api/movements');
+    expect(typeof res.body.totalAmount).toBe('number');
+  });
+});
+
+describe('GET /api/movements/series', () => {
+  const { getPool, getApp } = setupSuite();
+  const STORE = '__test_series_store__';
+  let catA: number;
+  let catB: number;
+  let pmA: number;
+
+  beforeAll(async () => {
+    const pool = getPool();
+    const a = await pool.query<{ id: number }>(
+      `INSERT INTO categories (name, color) VALUES ('__test_series_a__', '#111111') RETURNING id`
+    );
+    catA = a.rows[0].id;
+    const b = await pool.query<{ id: number }>(
+      `INSERT INTO categories (name, color) VALUES ('__test_series_b__', '#222222') RETURNING id`
+    );
+    catB = b.rows[0].id;
+    const pm = await pool.query<{ id: number }>(
+      `INSERT INTO payment_methods (name, kind) VALUES ('__test_series_pm__', 'cash') RETURNING id`
+    );
+    pmA = pm.rows[0].id;
+    // current window 2024-03-01..2024-03-05:
+    //   03-01 -> 10 catA pmA, 03-02 -> 20 catA, 03-05 -> 30 catB pmA
+    // previous window 2024-02-25..2024-02-29:
+    //   02-26 -> 40 uncategorized
+    await pool.query(
+      `INSERT INTO movements (amount, date, store, category_id, payment_method_id) VALUES
+         (10, '2024-03-01', $1, $2, $4),
+         (20, '2024-03-02', $1, $2, NULL),
+         (30, '2024-03-05', $1, $3, $4),
+         (40, '2024-02-26', $1, NULL, NULL)`,
+      [STORE, catA, catB, pmA]
+    );
+  });
+
+  afterAll(async () => {
+    const pool = getPool();
+    await pool.query(`DELETE FROM movements WHERE store = $1`, [STORE]);
+    await pool.query(`DELETE FROM categories WHERE name LIKE '__test_series_%'`);
+    await pool.query(`DELETE FROM payment_methods WHERE name LIKE '__test_series_%'`);
+    await pool.end();
+  });
+
+  it('400s when from or to is missing', async () => {
+    expect((await request(getApp()).get('/api/movements/series?from=2024-03-01')).status).toBe(400);
+    expect((await request(getApp()).get('/api/movements/series?to=2024-03-05')).status).toBe(400);
+    expect((await request(getApp()).get('/api/movements/series')).status).toBe(400);
+  });
+
+  it('400s on malformed dates', async () => {
+    const res = await request(getApp()).get('/api/movements/series?from=2024-13-40&to=2024-03-05');
+    expect(res.status).toBe(400);
+  });
+
+  it('400s when from > to', async () => {
+    const res = await request(getApp()).get('/api/movements/series?from=2024-03-05&to=2024-03-01');
+    expect(res.status).toBe(400);
+  });
+
+  it('returns a daily, zero-filled series for a sub-3-month range', async () => {
+    const res = await request(getApp()).get(
+      `/api/movements/series?store=${STORE}&from=2024-03-01&to=2024-03-05`
+    );
+    expect(res.status).toBe(200);
+    expect(res.body.granularity).toBe('day');
+    expect(res.body.data).toHaveLength(5); // 03-01 .. 03-05 inclusive
+    const byLabel = Object.fromEntries(
+      res.body.data.map((p: { label: string; total: number }) => [p.label, p.total])
+    );
+    expect(byLabel['2024-03-01']).toBe(10);
+    expect(byLabel['2024-03-02']).toBe(20);
+    expect(byLabel['2024-03-03']).toBe(0); // zero-filled gap
+    expect(byLabel['2024-03-04']).toBe(0);
+    expect(byLabel['2024-03-05']).toBe(30);
+    expect(res.body.comparison.currentTotal).toBe(60);
+  });
+
+  it('chooses granularity from the range span', async () => {
+    const g = async (from: string, to: string) =>
+      (await request(getApp()).get(`/api/movements/series?from=${from}&to=${to}`)).body.granularity;
+    expect(await g('2024-01-01', '2024-01-02')).toBe('hour'); // span 1 day
+    expect(await g('2024-01-01', '2024-04-02')).toBe('day'); // span 92 days
+    expect(await g('2024-01-01', '2025-06-01')).toBe('week'); // span < 730 days
+    expect(await g('2022-01-01', '2025-01-01')).toBe('month'); // span > 730 days
+  });
+
+  it('applies the category filter to the series totals', async () => {
+    const res = await request(getApp()).get(
+      `/api/movements/series?store=${STORE}&from=2024-03-01&to=2024-03-05&category_id=${catA}`
+    );
+    expect(res.status).toBe(200);
+    expect(res.body.comparison.currentTotal).toBe(30); // 10 + 20, catB's 30 excluded
+  });
+
+  it('applies the payment-method filter to the series totals', async () => {
+    const res = await request(getApp()).get(
+      `/api/movements/series?store=${STORE}&from=2024-03-01&to=2024-03-05&payment_method_id=${pmA}`
+    );
+    expect(res.status).toBe(200);
+    expect(res.body.comparison.currentTotal).toBe(40); // 10 + 30, the pm-less 20 excluded
+  });
+
+  it('reports a positive previous-period delta when spend rose', async () => {
+    const res = await request(getApp()).get(
+      `/api/movements/series?store=${STORE}&from=2024-03-01&to=2024-03-05`
+    );
+    expect(res.status).toBe(200);
+    // current 60 vs previous window (02-25..02-29) which holds the 40 movement
+    expect(res.body.comparison.previousTotal).toBe(40);
+    expect(res.body.comparison.currentTotal).toBe(60);
+    expect(res.body.comparison.deltaPct).toBeCloseTo(50);
+  });
+
+  it('returns null deltaPct when the previous period had zero spend', async () => {
+    const res = await request(getApp()).get(
+      `/api/movements/series?store=${STORE}&from=2024-03-01&to=2024-03-05&category_id=${catB}`
+    );
+    expect(res.status).toBe(200);
+    expect(res.body.comparison.previousTotal).toBe(0); // catB has nothing in the prior window
+    expect(res.body.comparison.currentTotal).toBe(30);
+    expect(res.body.comparison.deltaPct).toBeNull();
+  });
+});
+
 describe('GET /api/movements/:id', () => {
   const { getPool, getApp } = setupSuite();
   let movementId: number;

@@ -77,6 +77,7 @@ const mockMovements = {
     },
   ],
   total: 1,
+  totalAmount: 50,
   page: 1,
   limit: 5,
 };
@@ -228,7 +229,7 @@ describe('Dashboard', () => {
       previousPeriod: { totalAmount: 0, movementCount: 0 },
       topStore: null,
     };
-    const emptyMovements = { data: [], total: 0, page: 1, limit: 5 };
+    const emptyMovements = { data: [], total: 0, totalAmount: 0, page: 1, limit: 5 };
     vi.mocked(dashboardApi.getDashboard).mockResolvedValue(emptyDashboard);
     vi.mocked(movementsApi.getMovements).mockResolvedValue(emptyMovements);
     renderDashboard();

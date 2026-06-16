@@ -1,0 +1,134 @@
+[
+  {
+    "category": "functional",
+    "description": "Gmail OAuth connection and token storage",
+    "steps": [
+      "Add the `googleapis` dependency to the API; create migration `008_create-gmail-connection.js`: table `gmail_connection` — `id` (serial PK), `google_email` (text, not null), `access_token` (text, not null), `refresh_token` (text, not null), `token_expiry` (timestamptz, not null), `connected_at` (timestamptz default now); the app treats it as a single-row table (single-user app) — connecting again replaces the existing row",
+      "`GET /api/gmail/auth-url` — returns `{ url }` built from `GOOGLE_CLIENT_ID` / `GOOGLE_REDIRECT_URI` env vars with scope `gmail.readonly`, `access_type: offline` and `prompt: consent` (guarantees a refresh token); respond 500 with a clear `{ error }` naming the missing env var when configuration is absent; document in the README the three new env vars (`GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `GOOGLE_REDIRECT_URI`) plus the one-time Google Cloud Console walkthrough: create project → enable the Gmail API → configure the OAuth consent screen → create an OAuth client ID (web) with the redirect URI → copy credentials to `.env`; explicitly warn that the consent screen must be published to 'In production' (clicking through the unverified-app warning once) because 'Testing' status expires refresh tokens after 7 days, forcing weekly reconnects",
+      "`GET /api/gmail/oauth/callback` — exchanges the `code` for tokens, fetches the connected address via the Gmail profile endpoint, upserts the single `gmail_connection` row, then redirects to the client Gmail settings page with `?gmail=connected` (or `?gmail=error&reason=...` on any failure — never render a bare API error page to the browser)",
+      "`GET /api/gmail/status` — `{ connected: boolean, email: string | null, connectedAt: string | null }`, never returning tokens; `DELETE /api/gmail/connection` — best-effort token revocation against Google, delete the row, return 204",
+      "Create `api/src/helpers/gmailClient.ts` — exported `getGmailClient()` that loads the stored credentials, transparently refreshes the access token via the refresh_token when `token_expiry` has passed (persisting the new token + expiry), and throws typed errors `GMAIL_NOT_CONNECTED` / `GMAIL_AUTH_EXPIRED` that routes map to 401-style `{ error, code }` responses; tests mock `googleapis` (no real network) covering auth-url generation, callback upsert/replace, status, disconnect, and refresh-on-expiry persistence"
+    ],
+    "passes": true
+  },
+  {
+    "category": "functional",
+    "description": "Sender filters and candidate email listing API",
+    "steps": [
+      "Create migration `009_create-gmail-import-tables.js`: table `gmail_senders` — `id` (serial PK), `email` (text, unique, not null, stored lowercased), `label` (text, nullable — e.g. 'DAVIbank alerts'), `subject_contains` (text, nullable — e.g. 'Alerta de compra'; when set, only emails from this sender whose subject contains the phrase are candidates), `created_at` (timestamptz default now); and table `gmail_imported_messages` — `gmail_message_id` (text), `movement_id` (int, nullable, FK → movements ON DELETE SET NULL), `imported_at` (timestamptz default now), PK (`gmail_message_id`, `movement_id`) — written by the confirm flow in a later feature, read here for badges",
+      "`GET /api/gmail/senders` — all senders ordered by email; `POST /api/gmail/senders` — zod: `email` required valid email (lowercased before insert), `label` optional 1–60 chars, `subject_contains` optional 1–100 chars, 409 on duplicate email; `PUT /api/gmail/senders/:id` — partial update of label/subject_contains; `DELETE /api/gmail/senders/:id` — hard delete, 204 (mirror the `{ error, details? }` shape of existing routes)",
+      "`GET /api/gmail/messages` — query params `from` / `to` (ISO dates, default last 30 days), `sender` (optional single address; default uses all configured senders), `subject` (optional ad-hoc phrase, ANDed on top of per-sender filters), `pageToken` (optional); builds a Gmail search query OR-ing one group per sender — `(from:a subject:\"Alerta de compra\")` when the sender has `subject_contains`, plain `(from:b)` otherwise — plus `after:`/`before:` date bounds, so filtering happens server-side at Google and noise emails (OTPs, statements, marketing) never reach the app; respond 400 with a clear message when no senders are configured and no `sender` param is given",
+      "For each message in the page, return `{ id, threadId, from, subject, date, snippet, alreadyImported }` using `messages.list` plus metadata-format `messages.get` calls; `alreadyImported` is true when any `gmail_imported_messages` row exists for the message id; pass Gmail's `nextPageToken` through in the response for pagination",
+      "Map Gmail auth failures (`GMAIL_NOT_CONNECTED` / `GMAIL_AUTH_EXPIRED` from the helper, or 401s from Google) to a 401 `{ error, code: 'GMAIL_RECONNECT_REQUIRED' }` the client can act on; tests mock the gmail client covering sender CRUD validation, query construction (dates, sender OR-groups with and without subject_contains, ad-hoc subject param, phrase quoting/escaping), the no-senders 400, alreadyImported annotation, and pagination passthrough"
+    ],
+    "passes": true
+  },
+  {
+    "category": "integration",
+    "description": "Shared text-extraction core and email body extraction endpoint",
+    "steps": [
+      "Refactor `api/src/routes/import.ts`: move the prompt construction, OpenRouter call, defensive output validation, payment-method matching, `suggestedNewCategory` second pass, description sanitizer, store-context enrichment, and `parseAmount` / `amountSuspect` reconciliation into `api/src/helpers/extractMovements.ts` exposing `extractMovementsFromText(rawText, opts)`; `POST /api/import/extract` (OCR path) now calls it — its response shape is unchanged and all existing extraction tests stay green",
+      "`POST /api/import/extract-emails` — body `{ messageIds: string[] }` (zod: 1–25 unique ids); for each id fetch the full message via `getGmailClient()`, prefer the `text/plain` MIME part and fall back to an HTML→text conversion of `text/html` (strip tags, styles, and invisible content), and prepend `Subject:` / `From:` / `Date:` header lines so the model sees the notification context",
+      "Run `extractMovementsFromText` once per email; tag every returned movement with `gmailMessageId` and `source: 'gmail'`; the response is `{ emails: [{ messageId, subject, from, date, movements: [...], error: string | null }], language }` — an email that yields no movements returns an empty `movements` array, not a failure",
+      "All existing enrichment applies identically to email text: registered payment-method matching with `detectedPaymentLabel` fallback, second-pass category suggestion with the in-process dedup cache, description sanitizer, `store_context` web enrichment, and `rawAmountText` + `amountSuspect` locale reconciliation — DAVIbank-style Spanish notifications are the primary fixture",
+      "Per-email error isolation: a fetch or model failure for one message id produces `{ messageId, error }` for that entry without failing the batch; tests mock gmail + OpenRouter covering plain-text bodies, HTML-only bodies, multi-movement emails, batch isolation on one failing email, and the gmailMessageId tagging"
+    ],
+    "passes": true
+  },
+  {
+    "category": "functional",
+    "description": "Import confirmation with Gmail deduplication",
+    "steps": [
+      "Extend the `POST /api/import/confirm` `movementItemSchema` with an optional `gmail_message_id` (non-empty string); inside the existing bulk-insert transaction, write one `gmail_imported_messages` row per item that carries the field, linking the created movement id",
+      "Before inserting, check the incoming `gmail_message_id`s against `gmail_imported_messages`: any id already present from a previous confirm causes a 409 `{ error, details: { alreadyImported: [ids] } }` and nothing is persisted — defends against double-clicks and stale review tabs",
+      "Multiple items in one confirm batch may share the same `gmail_message_id` (one email containing several movements) — that is legal and produces one log row per movement; only ids imported by earlier confirms conflict",
+      "Deleting a movement keeps its log row (`movement_id` becomes null via ON DELETE SET NULL) so the email stays marked imported and is not offered for re-import — deliberate; the listing endpoint's `alreadyImported` flag therefore reflects 'ever imported'",
+      "Tests: confirm with gmail ids writes log rows in-transaction (rolled back together on a bad item), 409 on re-confirm of an already-imported id, multi-movement-per-email batch succeeds, movement deletion preserves the imported mark, and confirms without `gmail_message_id` (OCR flow) behave exactly as before"
+    ],
+    "passes": true
+  },
+  {
+    "category": "ui",
+    "description": "Gmail connection settings screen",
+    "steps": [
+      "Add a `/settings/gmail` route and a 'Gmail' link in the persistent nav; render a connection card driven by `GET /api/gmail/status`: when connected show the Google address, connected-since date, and a Disconnect button with a confirmation popover (calls DELETE, returns to the disconnected state); when disconnected show an explainer ('Import movements from your bank notification emails') and a Connect Gmail button that navigates to the URL from `GET /api/gmail/auth-url`",
+      "Handle the OAuth return params on this page: `?gmail=connected` shows a success toast and refreshes status; `?gmail=error&reason=...` shows the reason in an error banner; both params are cleaned from the URL after handling",
+      "Below the connection card, render the sender filter manager: list of configured senders (email, label, a subject-filter chip like 'subject contains \"Alerta de compra\"' when set, edit icon, delete icon with confirmation), and an add form with email + optional label + optional 'Subject contains' inputs, placeholders `alertas@davibank.com` / `Alerta de compra`, helper text 'Leave subject empty to list every email from this sender'; client-side email validation, server 409 duplicate surfaced inline",
+      "Empty/guard states: connected with zero senders shows a prompt card 'Add the addresses your bank sends purchase alerts from'; any API response with `code: 'GMAIL_RECONNECT_REQUIRED'` renders a warning banner with a Reconnect button wired to the auth-url flow",
+      "Client tests (Vitest, mocked api module): status rendering in both states, connect button navigation, disconnect flow, return-param toasts, sender add/delete with validation and duplicate error, and the reconnect banner"
+    ],
+    "passes": true
+  },
+  {
+    "category": "ui",
+    "description": "Gmail email picker in the import flow",
+    "steps": [
+      "Convert the `/import` page's Step 1 into two source tabs: 'Upload receipt' (the existing upload flow, untouched) and 'From Gmail'; the Gmail tab guards in order — not connected → CTA card linking to `/settings/gmail`; connected but no senders → CTA to configure senders",
+      "Email list driven by `GET /api/gmail/messages`: a date-range control with preset chips — 'This week', 'This month', 'Last week', 'Last month', 'Last 30 days' (default) — plus a 'Custom' option exposing native from/to date inputs (presets simply fill the same from/to values sent to the API; reuse the date math from `PeriodSelector` helpers where it fits); a sender dropdown (All + each configured sender) and a debounced subject search input mapped to the `subject` param; rows show from, subject, date, and snippet with a checkbox; rows with `alreadyImported: true` show an 'Imported' badge and a disabled checkbox; a 'Load more' button appends the next page via `pageToken`",
+      "An 'Extract N emails' primary button (enabled when ≥1 selected, selection capped at 25 with a visible counter) calls `POST /api/import/extract-emails` and shows a progress state while extracting",
+      "Emails that return a per-email `error` render as inline error rows above the results with a per-email Retry that re-extracts only that message id, merging its movements into the pending review set without disturbing already-extracted rows",
+      "Client tests: tab guards for the three connection states, imported-badge disabling, selection cap, load-more pagination, extraction call payload, and single-email retry merging"
+    ],
+    "passes": true
+  },
+  {
+    "category": "ui",
+    "description": "Review and confirm Gmail-extracted movements",
+    "steps": [
+      "Feed email-extracted movements into the existing Step 3 review table component unchanged — editable amount with ⚠ `amountSuspect` hint, AI-suggested category text field, 'Paid with' select with the register-card prompt, ✦ badges — each row carrying its `gmailMessageId` internally",
+      "Add a 'Source' cell for gmail-sourced rows showing the email subject truncated with a tooltip of from + date, so multi-email batches stay traceable; OCR-sourced rows render the column empty (or it is hidden entirely for upload imports)",
+      "When extraction yields zero movements across all selected emails, show a friendly empty state ('No movements found in the selected emails') with a back-to-list action; 'Import N Movements' includes each row's `gmail_message_id` in the `POST /api/import/confirm` payload",
+      "Handle the 409 already-imported response by marking the conflicting rows inline ('Already imported') and letting the user confirm the remaining rows without re-extracting",
+      "The success summary card additionally states 'N emails marked as imported'; navigating back to the Gmail email list reflects the new Imported badges without a full page reload; client tests cover the source column, confirm payload, 409 row-marking, empty state, and badge refresh"
+    ],
+    "passes": true
+  },
+  {
+    "category": "functional",
+    "description": "Time-of-day field on movements",
+    "steps": [
+      "Create migration `010_add-time-to-movements.js`: add `time` (Postgres `time`, nullable) to `movements` — wall-clock time as printed on the receipt/notification, no timezone; `date` stays the canonical column for all dashboard grouping and date filters, which are unchanged",
+      "Update `POST /api/movements` and `PUT /api/movements/:id` zod schemas with an optional nullable `time` accepting 'HH:MM' or 'HH:MM:SS' (24h), normalized to 'HH:MM:SS' before insert; PUT supports explicit null to clear it; include `time` (as 'HH:MM' or null) on every movement returned by GET /api/movements, GET /api/movements/:id, and the dashboard's recent movements",
+      "Change movement list ordering to `date DESC, time DESC NULLS LAST, created_at DESC` so same-day movements with times sort chronologically and untimed ones sink below them within the day",
+      "Extend the `POST /api/import/confirm` `movementItemSchema` with the same optional `time` field, persisted in the bulk-insert transaction",
+      "Add an optional native time input to `MovementForm.tsx` beside the date field (empty by default, pre-populated in edit mode, cleared value submits null); show 'HH:MM' beside the date on Dashboard Recent Movements rows when set; API tests cover format validation, normalization, clearing via null, and ordering; client tests cover the form round-trip and list display"
+    ],
+    "passes": true
+  },
+  {
+    "category": "integration",
+    "description": "Extract time during import and flag possible duplicate movements",
+    "steps": [
+      "Extend the shared `extractMovementsFromText` prompt with a per-movement `time` field: 'HH:MM' 24-hour string or null when the text shows no time; include bilingual format cues — Spanish notifications write '02:32 p. m.', '2:32 PM', or '14:32' — instructing normalization to 24h; defend server-side with a regex validator that normalizes or nulls anything malformed (never reject the movement over a bad time)",
+      "After extraction (both OCR and email paths), check each movement against existing movements on normalized store (case-insensitive), equal amount, and equal date: on match, set `possibleDuplicate: true` and a `duplicateOf` summary `{ id, date, time, description }`; when both the candidate and the existing movement carry non-null times that differ, suppress the flag — distinct same-day purchases at the same store are legitimate",
+      "Also flag duplicates within a single extraction batch (two selected emails or one email listing the same purchase twice) using the same store+amount+date(+time) rule, marking the later row",
+      "In the import review table: an editable time input column prefilled from extraction, and a ⚠ 'Possible duplicate' badge on flagged rows with a tooltip describing the matched movement ('Looks like movement #42 — same store, amount and date'); the badge is informational only — confirmation is never blocked, and the user can deselect/remove the row instead",
+      "Tests: time parsing across '14:32' / '2:32 PM' / '02:32 p. m.' / absent / malformed, duplicate flag against existing DB movements, suppression when times differ, within-batch flagging, confirm proceeding despite flags, and the review table rendering of time + badge"
+    ],
+    "passes": true
+  },
+  {
+    "category": "functional",
+    "description": "Background Gmail polling into a pending import queue",
+    "steps": [
+      "Create migration `011_create-gmail-pending-imports.js`: table `gmail_pending_imports` — `gmail_message_id` (text PK), `from_address` (text), `subject` (text), `email_date` (timestamptz), `movements` (jsonb, not null, default '[]' — the extracted payload in the exact shape the review table consumes), `status` (text, not null, CHECK in 'pending' | 'error' | 'dismissed'), `error` (text, nullable), `detected_at` (timestamptz default now), `extracted_at` (timestamptz, nullable); also add `last_polled_at` (timestamptz, nullable) and `needs_reconnect` (boolean default false) to `gmail_connection`",
+      "Create `api/src/jobs/gmailPoller.ts` — an in-process interval started with the API server: cadence from `GMAIL_POLL_INTERVAL_MINUTES` (default 60; 0 disables; never started when NODE_ENV=test), plus one catch-up tick shortly after startup (covers the laptop-was-off case); each tick is a no-op unless connected, not `needs_reconnect`, and ≥1 sender is configured; it searches Gmail with the configured sender/subject filters from max(`last_polled_at` − 1 day overlap, 30 days ago) and skips message ids already present in `gmail_imported_messages` or `gmail_pending_imports` (any status)",
+      "For each new email, sequentially (gentle on rate limits) fetch the body and run the full `extractMovementsFromText` pipeline — payment-method matching, category suggestion, parseAmount/amountSuspect, time, duplicate flagging — storing the result as status 'pending'; an extraction failure stores status 'error' with the message instead of dropping the email; `last_polled_at` updates only after a tick completes; `GMAIL_AUTH_EXPIRED` sets `needs_reconnect = true` and suspends ticks until the OAuth callback clears it on reconnect",
+      "Pending-queue endpoints: `GET /api/gmail/pending` (status filter, default 'pending', rows ordered by email_date desc with parsed movements); `GET /api/gmail/pending/count` — `{ emails, movements }` for the badge; `POST /api/gmail/pending/:messageId/dismiss` → status 'dismissed' (row kept so polling never re-suggests it); `POST /api/gmail/pending/:messageId/retry` — re-extracts an 'error' row in place; `POST /api/gmail/poll-now` — runs one tick on demand and returns `{ newEmails, errors }`",
+      "Integrate with confirm: `POST /api/import/confirm` deletes the pending rows of any confirmed `gmail_message_id`s inside the same transaction (`gmail_imported_messages` remains the permanent imported record); Jest tests with fake timers and mocked gmail/OpenRouter covering skip-when-disconnected, dedup against both imported and pending, error capture + retry, needs_reconnect suspension, poll-now, startup catch-up tick, and confirm clearing the queue"
+    ],
+    "passes": true
+  },
+  {
+    "category": "ui",
+    "description": "Pending imports inbox and notification badge",
+    "steps": [
+      "Show a count badge on the nav 'Import' link fed by `GET /api/gmail/pending/count`, fetched on app load, refreshed every 5 minutes while the tab is open, and immediately after any confirm or dismiss; when the count is > 0, prefix `document.title` with '(N)' so the browser tab itself signals pending movements (in-app notification only — OS/browser push is out of scope for this iteration)",
+      "On the /import 'From Gmail' tab, render a 'Pending review' section above the manual email browser: one card per auto-detected email showing from, subject, date, and a one-line summary per extracted movement (store — amount — date), with a checkbox per email and a 'Review N emails' primary action that feeds the stored payloads straight into the existing review table without re-extraction",
+      "Each card has a dismiss icon with confirmation ('Dismiss — this email won't be suggested again'); 'error' cards show the stored extraction message and a Retry button wired to the retry endpoint, swapping into a normal pending card on success",
+      "Confirming from the review table removes those emails from the pending section and refreshes the badge; a 'Check now' button triggers `POST /api/gmail/poll-now` with a spinner and a 'Last checked: …' line from `last_polled_at` (also shown on the Gmail settings page); when the API reports reconnect-required, the pending section is replaced by the existing reconnect banner",
+      "Client tests: badge count and title prefix, pending cards with movement summaries, review handoff without re-extraction, dismiss and retry flows, check-now, and badge refresh after confirm"
+    ],
+    "passes": true
+  }
+]

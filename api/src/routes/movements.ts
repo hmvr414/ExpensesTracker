@@ -4,6 +4,7 @@ import { z } from 'zod';
 import db, { getPool } from '../db';
 import { resolveCategoryByName } from '../helpers/categoryResolver';
 import { TIME_FIELD, normalizeTime } from '../helpers/timeField';
+import { chooseGranularity, timeSeriesFormat } from '../helpers/timeSeries';
 
 const router = Router();
 
@@ -64,6 +65,74 @@ const DATE_ISO_BARE = `to_char(date, 'YYYY-MM-DD') AS date`;
 const TIME_HHMM = `to_char(m.time, 'HH24:MI') AS time`;
 const TIME_HHMM_BARE = `to_char(time, 'HH24:MI') AS time`;
 
+// Parses the `category_id` query param in all accepted forms — a single value,
+// repeated params (`category_id=3&category_id=7`), and comma-separated
+// (`category_id=3,7`) — into a deduplicated list of positive ints. Non-numeric
+// and non-positive tokens are silently dropped rather than rejected.
+function parseCategoryIds(raw: unknown): number[] {
+  if (raw === undefined || raw === null) return [];
+  const values = Array.isArray(raw) ? raw : [raw];
+  const ids: number[] = [];
+  for (const value of values) {
+    if (typeof value !== 'string') continue;
+    for (const token of value.split(',')) {
+      const trimmed = token.trim();
+      if (!/^\d+$/.test(trimmed)) continue;
+      const n = parseInt(trimmed, 10);
+      if (n > 0 && !ids.includes(n)) ids.push(n);
+    }
+  }
+  return ids;
+}
+
+// Builds the non-date filter SQL fragments (category / uncategorized / payment
+// method / store / search) shared by the list and series endpoints so the chart
+// always reflects exactly the rows the table shows. Appends bind values to
+// `params` (mutated) and returns the matching `m.`-qualified conditions. Callers
+// add their own date predicates (the list uses from/to; series uses its bounds).
+function buildMovementFilters(query: Request['query'], params: unknown[]): string[] {
+  const conditions: string[] = [];
+  const { store, search, payment_method_id } = query;
+  const categoryIds = parseCategoryIds(query.category_id);
+  const uncategorized = query.uncategorized === 'true';
+
+  if (categoryIds.length && uncategorized) {
+    conditions.push(`(m.category_id = ANY($${params.push(categoryIds)}) OR m.category_id IS NULL)`);
+  } else if (categoryIds.length) {
+    conditions.push(`m.category_id = ANY($${params.push(categoryIds)})`);
+  } else if (uncategorized) {
+    conditions.push(`m.category_id IS NULL`);
+  }
+  if (payment_method_id) {
+    conditions.push(`m.payment_method_id = $${params.push(parseInt(payment_method_id as string, 10))}`);
+  }
+  if (store) conditions.push(`m.store ILIKE $${params.push(`%${store}%`)}`);
+  if (search) {
+    const idx = params.push(`%${search}%`);
+    conditions.push(`(m.description ILIKE $${idx} OR m.store ILIKE $${idx})`);
+  }
+  return conditions;
+}
+
+function pad2(n: number): string {
+  return String(n).padStart(2, '0');
+}
+
+function toISODate(d: Date): string {
+  return `${d.getUTCFullYear()}-${pad2(d.getUTCMonth() + 1)}-${pad2(d.getUTCDate())}`;
+}
+
+function addDays(iso: string, n: number): string {
+  const d = new Date(`${iso}T00:00:00Z`);
+  d.setUTCDate(d.getUTCDate() + n);
+  return toISODate(d);
+}
+
+function isValidISODate(s: unknown): s is string {
+  if (typeof s !== 'string' || !ISO_DATE.test(s)) return false;
+  return !isNaN(new Date(`${s}T00:00:00Z`).getTime());
+}
+
 function validationError(err: z.ZodError, res: Response): void {
   const details: Record<string, string> = {};
   for (const issue of err.issues) {
@@ -73,31 +142,27 @@ function validationError(err: z.ZodError, res: Response): void {
 }
 
 router.get('/', async (req: Request, res: Response) => {
-  const { from, to, category_id, store, search, payment_method_id } = req.query;
+  const { from, to } = req.query;
   const pageNum = Math.max(1, parseInt(req.query.page as string, 10) || 1);
-  const limitNum = Math.min(100, Math.max(1, parseInt(req.query.limit as string, 10) || 20));
+  const limitNum = Math.min(200, Math.max(1, parseInt(req.query.limit as string, 10) || 20));
   const offset = (pageNum - 1) * limitNum;
 
-  const conditions: string[] = [];
   const params: unknown[] = [];
+  const conditions: string[] = [];
 
   if (from) conditions.push(`m.date >= $${params.push(from)}`);
   if (to) conditions.push(`m.date <= $${params.push(to)}`);
-  if (category_id) conditions.push(`m.category_id = $${params.push(parseInt(category_id as string, 10))}`);
-  if (payment_method_id) conditions.push(`m.payment_method_id = $${params.push(parseInt(payment_method_id as string, 10))}`);
-  if (store) conditions.push(`m.store ILIKE $${params.push(`%${store}%`)}`);
-  if (search) {
-    const idx = params.push(`%${search}%`);
-    conditions.push(`(m.description ILIKE $${idx} OR m.store ILIKE $${idx})`);
-  }
+  conditions.push(...buildMovementFilters(req.query, params));
 
   const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
 
-  const countResult = await db.query<{ total: string }>(
-    `SELECT COUNT(*)::text AS total FROM movements m ${where}`,
+  const countResult = await db.query<{ total: string; total_amount: number }>(
+    `SELECT COUNT(*)::text AS total, COALESCE(SUM(m.amount), 0)::float8 AS total_amount
+     FROM movements m ${where}`,
     params
   );
   const total = parseInt(countResult.rows[0].total, 10);
+  const totalAmount = countResult.rows[0].total_amount;
 
   const limitIdx = params.push(limitNum);
   const offsetIdx = params.push(offset);
@@ -118,7 +183,92 @@ router.get('/', async (req: Request, res: Response) => {
     params
   );
 
-  res.json({ data: result.rows, total, page: pageNum, limit: limitNum });
+  res.json({ data: result.rows, total, totalAmount, page: pageNum, limit: limitNum });
+});
+
+// Filter-aware, zero-filled spend time series over an explicit [from, to] range.
+// Accepts the same filter params as the list endpoint; bucket granularity adapts
+// to the span (see helpers/timeSeries). Declared before `/:id` so the literal
+// path wins over the param route.
+router.get('/series', async (req: Request, res: Response) => {
+  const { from, to } = req.query;
+  if (!isValidISODate(from) || !isValidISODate(to)) {
+    res.status(400).json({ error: 'from and to are required ISO dates (YYYY-MM-DD)' });
+    return;
+  }
+  if (from > to) {
+    res.status(400).json({ error: 'from must be on or before to' });
+    return;
+  }
+
+  const fmt = timeSeriesFormat(chooseGranularity(from, to));
+
+  // $1 = from, $2 = to, then the shared (non-date) filters.
+  const params: unknown[] = [from, to];
+  const filters = buildMovementFilters(req.query, params);
+  const filterSql = filters.length ? `AND ${filters.join(' AND ')}` : '';
+
+  // Hourly buckets resolve to the movement's date+time; coarser buckets use the
+  // date alone. Bounds are generated over DATE_TRUNC'd ends so partial first/last
+  // buckets still appear.
+  const bucketExpr =
+    fmt.truncUnit === 'hour'
+      ? `DATE_TRUNC('hour', (m.date + COALESCE(m.time, '00:00'::time))::timestamp)`
+      : `DATE_TRUNC('${fmt.truncUnit}', m.date::timestamp)`;
+  const lowerBound =
+    fmt.truncUnit === 'hour'
+      ? `$1::timestamp`
+      : `DATE_TRUNC('${fmt.truncUnit}', $1::timestamp)`;
+  const upperBound =
+    fmt.truncUnit === 'hour'
+      ? `$2::timestamp + interval '23 hour'`
+      : `DATE_TRUNC('${fmt.truncUnit}', $2::timestamp)`;
+
+  const seriesResult = await db.query<{ label: string; total: number }>(
+    `WITH buckets AS (
+       SELECT generate_series(${lowerBound}, ${upperBound}, '${fmt.interval}'::interval) AS bucket
+     )
+     SELECT TO_CHAR(b.bucket, '${fmt.labelFormat}') AS label,
+            COALESCE(SUM(m.amount), 0)::float8 AS total
+     FROM buckets b
+     LEFT JOIN movements m
+       ON ${bucketExpr} = b.bucket
+       AND m.date >= $1 AND m.date <= $2
+       ${filterSql}
+     GROUP BY b.bucket
+     ORDER BY b.bucket`,
+    params
+  );
+
+  const data = seriesResult.rows.map((r) => ({ label: r.label.trim(), total: r.total }));
+  const currentTotal = data.reduce((sum, p) => sum + p.total, 0);
+
+  // Equal-length window immediately preceding [from, to], same filters applied.
+  const windowDays =
+    Math.round((Date.parse(`${to}T00:00:00Z`) - Date.parse(`${from}T00:00:00Z`)) / 86_400_000) + 1;
+  const prevFrom = addDays(from, -windowDays);
+  const prevTo = addDays(from, -1);
+
+  const prevParams: unknown[] = [prevFrom, prevTo];
+  const prevFilters = buildMovementFilters(req.query, prevParams);
+  const prevFilterSql = prevFilters.length ? `AND ${prevFilters.join(' AND ')}` : '';
+  const prevResult = await db.query<{ total: number }>(
+    `SELECT COALESCE(SUM(m.amount), 0)::float8 AS total
+     FROM movements m
+     WHERE m.date >= $1 AND m.date <= $2 ${prevFilterSql}`,
+    prevParams
+  );
+  const previousTotal = prevResult.rows[0].total;
+  const deltaPct =
+    previousTotal === 0
+      ? null
+      : Math.round(((currentTotal - previousTotal) / previousTotal) * 10000) / 100;
+
+  res.json({
+    granularity: fmt.granularity,
+    data,
+    comparison: { previousTotal, currentTotal, deltaPct },
+  });
 });
 
 router.get('/:id', async (req: Request, res: Response) => {

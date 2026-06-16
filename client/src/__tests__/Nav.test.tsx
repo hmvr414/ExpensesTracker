@@ -39,10 +39,17 @@ describe('Nav', () => {
   it('renders links to all routes', () => {
     renderWithRouter();
     expect(screen.getByRole('link', { name: /dashboard/i })).toBeInTheDocument();
+    expect(screen.getByRole('link', { name: /^movements$/i })).toBeInTheDocument();
     expect(screen.getByRole('link', { name: /import/i })).toBeInTheDocument();
     expect(screen.getByRole('link', { name: /^categories$/i })).toBeInTheDocument();
     expect(screen.getByRole('link', { name: /payment methods/i })).toBeInTheDocument();
     expect(screen.getByRole('link', { name: /^gmail$/i })).toBeInTheDocument();
+  });
+
+  it('movements link points to /movements', () => {
+    renderWithRouter();
+    const link = screen.getByRole('link', { name: /^movements$/i });
+    expect(link).toHaveAttribute('href', '/movements');
   });
 
   it('dashboard link points to /', () => {
